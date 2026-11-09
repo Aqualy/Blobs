@@ -173,3 +173,25 @@ test('no-overlap: shape stays continuous while a blob sweeps through a bridge', 
   }
   assert.ok(worst < 2.5, `max field jump per step was ${worst.toFixed(3)}`);
 });
+
+test('no-overlap: removes only the crossing bridges, keeps every other bridge intact', () => {
+  // Regression: a user composition where the switch used to strip outer edges too.
+  const z = 0.65;
+  const raw = [[78, 265, 70], [128, 598, 70], [375, 168, 52], [548, 482, 80], [600, -10, 55]];
+  const blobs = raw.map(([x, y, r], i) => ({ id: i + 1, x: x / z, y: y / z, r: r / z }));
+  const key = (q) => `${blobs[q.ia].id}-${blobs[q.ib].id}`;
+  let checked = 0;
+  for (const reach of [4.5, 5.5, 6.5, 7.5, 8]) for (const thickness of [0.4, 0.6, 0.8]) for (const smooth of [0.5, 0.8, 1.1]) {
+    const p = { ...P, reach, thickness, smooth };
+    const off = new Map(computePairs(blobs, p).map((q) => [key(q), q.wMid]));
+    const on = new Map(computePairs(blobs, { ...p, noOverlap: true }).map((q) => [key(q), q.wMid]));
+    for (const e of ['1-2', '1-3', '2-4', '3-4']) {
+      if ((off.get(e) ?? -1) > 2) assert.ok((on.get(e) ?? -99) > off.get(e) * 0.8, `${e} weakened at ${JSON.stringify(p)}`);
+    }
+    if ((off.get('1-4') ?? -1) > 0 && (off.get('2-3') ?? -1) > 0) {
+      checked++;
+      for (const e of ['1-4', '2-3']) assert.ok(!((on.get(e) ?? -99) > 0), `crossing ${e} kept at ${JSON.stringify(p)}`);
+    }
+  }
+  assert.ok(checked > 0, 'scenario never produced a visible crossing');
+});

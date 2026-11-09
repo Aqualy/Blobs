@@ -11,7 +11,7 @@ Plain HTML/CSS/JS with no build step and no dependencies. It runs on any static 
 - **Dynamic compositions.** Each blob can drift, orbit, swing, and pulse. All motion repeats exactly over the loop length, so recorded videos loop seamlessly.
 - **Colour blending.** Blobs of different colours blend cleanly through their bridges. The palette includes `#c5d92f` and `#dddddd`.
 - **Bridge controls.** Sliders set reach, snap point, thickness, flare, taper, smoothness, and organic variation.
-- **No overlap switch.** When it is on, bridges never cross, merge into each other, or run through a third blob. Where two bridges would touch, the weaker one (the relatively longer gap) thins and then pinches off; it never disappears abruptly.
+- **No overlap switch.** When it is on, bridges that cross are removed (both of them, unless one is clearly stronger), and a bridge that brushes against another bridge or runs through a third blob gives way. Bridges meeting at a shared blob are left alone, so the rest of the composition stays exactly as it was. Removed bridges thin out and pinch off; they never pop.
 - **Export options.**
   - PNG at 1×, 2×, or 4×, with an optional transparent background.
   - SVG as true vector outlines (marching squares plus Catmull–Rom curves). Multi-colour compositions become crisp colour regions.

@@ -186,23 +186,73 @@ function sampleBridge(br) {
   return out;
 }
 
-/** Smallest gap between the surfaces of two sampled bridges. */
-function bridgeClearance(P, Q) {
+/**
+ * Extra clearance granted near blobs the bridges legitimately meet at:
+ * bridges always join their own blobs, so closeness there is not an overlap.
+ * Each root is { X, zone, w }; the allowance fades out gently (over twice
+ * the zone) so nothing changes abruptly as a bridge leaves a root's area.
+ */
+function rootAllowance(x, y, roots) {
+  let best = 0;
+  for (const r of roots) {
+    const e = Math.hypot(x - r.X.x, y - r.X.y) - r.X.r;
+    const v = r.w * (r.zone * 2.5 + 10) * (1 - smoothstep(0, r.zone * 2, e));
+    if (v > best) best = v;
+  }
+  return best;
+}
+
+/** 1 for the same blob or blobs merged together, fading to 0 as they part. */
+function touching(E1, E2, p) {
+  if (E1 === E2) return 1;
+  const gap = Math.hypot(E1.x - E2.x, E1.y - E2.y) - E1.r - E2.r;
+  return 1 - smoothstep(0, blobK(Math.min(E1.r, E2.r), p) + 4, gap);
+}
+
+// Closest points between segments AB and CD. Writes [distance, s, t] into SEG.
+const SEG = [0, 0, 0];
+function segSeg(ax, ay, bx, by, cx, cy, dx, dy) {
+  const ux = bx - ax, uy = by - ay, vx = dx - cx, vy = dy - cy, wx = ax - cx, wy = ay - cy;
+  const A = ux * ux + uy * uy, B = ux * vx + uy * vy, C = vx * vx + vy * vy;
+  const D = ux * wx + uy * wy, E = vx * wx + vy * wy;
+  const den = A * C - B * B;
+  let sN, sD = den, tN, tD = den;
+  if (den < 1e-9) { sN = 0; sD = 1; tN = E; tD = C; }
+  else {
+    sN = B * E - C * D; tN = A * E - B * D;
+    if (sN < 0) { sN = 0; tN = E; tD = C; } else if (sN > sD) { sN = sD; tN = E + B; tD = C; }
+  }
+  if (tN < 0) { tN = 0; if (-D < 0) sN = 0; else if (-D > A) sN = sD; else { sN = -D; sD = A; } }
+  else if (tN > tD) { tN = tD; if (-D + B < 0) sN = 0; else if (-D + B > A) sN = sD; else { sN = -D + B; sD = A; } }
+  const sc = Math.abs(sN) < 1e-12 ? 0 : sN / (sD || 1e-12);
+  const tc = Math.abs(tN) < 1e-12 ? 0 : tN / (tD || 1e-12);
+  SEG[0] = Math.hypot(wx + sc * ux - tc * vx, wy + sc * uy - tc * vy);
+  SEG[1] = sc; SEG[2] = tc;
+  return SEG;
+}
+
+/**
+ * Smallest gap between the surfaces of two sampled bridges (negative when
+ * they interpenetrate), ignoring closeness around a shared root blob.
+ */
+let CLR_W = 0; // combined half-widths at the closest approach of the last call
+function bridgeClearance(P, Q, roots) {
   let best = Infinity;
-  for (let pass = 0; pass < 2; pass++) {
-    const S = pass ? Q : P, T = pass ? P : Q;
-    for (let i = 0; i < SAMPLES; i++) {
-      const px = S[i * 3], py = S[i * 3 + 1], pr = S[i * 3 + 2];
-      for (let j = 0; j < SAMPLES - 1; j++) {
-        const ax = T[j * 3], ay = T[j * 3 + 1];
-        const ex = T[j * 3 + 3] - ax, ey = T[j * 3 + 4] - ay;
-        const len2 = ex * ex + ey * ey || 1e-9;
-        const h = clamp(((px - ax) * ex + (py - ay) * ey) / len2, 0, 1);
-        const dist = Math.hypot(px - ax - ex * h, py - ay - ey * h);
-        const qr = T[j * 3 + 2] + (T[j * 3 + 5] - T[j * 3 + 2]) * h;
-        const c = dist - pr - qr;
-        if (c < best) best = c;
+  CLR_W = 0;
+  for (let i = 0; i < SAMPLES - 1; i++) {
+    const ax = P[i * 3], ay = P[i * 3 + 1], bx = P[i * 3 + 3], by = P[i * 3 + 4];
+    for (let j = 0; j < SAMPLES - 1; j++) {
+      const cx = Q[j * 3], cy = Q[j * 3 + 1], dx = Q[j * 3 + 3], dy = Q[j * 3 + 4];
+      const [dist, sc, tc] = segSeg(ax, ay, bx, by, cx, cy, dx, dy);
+      const pr = P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * sc;
+      const qr = Q[j * 3 + 2] + (Q[j * 3 + 5] - Q[j * 3 + 2]) * tc;
+      let c = dist - pr - qr;
+      if (roots.length) {
+        const px = ax + (bx - ax) * sc, py = ay + (by - ay) * sc;
+        const qx = cx + (dx - cx) * tc, qy = cy + (dy - cy) * tc;
+        c += Math.min(rootAllowance(px, py, roots), rootAllowance(qx, qy, roots));
       }
+      if (c < best) { best = c; CLR_W = pr + qr; }
     }
   }
   return best;
@@ -224,7 +274,10 @@ function suppressOverlaps(cands, blobs, n, p) {
     const br = buildPair(c, c.t, p);
     return { br, smp: sampleBridge(br), strength: 1 - c.t };
   });
-  const ramp = (clearance, margin) => 1 - smoothstep(margin, margin * 2.6 + 10, clearance);
+  // Only real contact counts: the ramp starts just before surfaces would
+  // visibly web together through the smooth-min fillet.
+  const ramp = (clearance, margin) => 1 - smoothstep(margin, margin * 1.6 + 6, clearance);
+  const rootZone = (br, X) => Math.max(br.w0, br.w1, 0) * 1.5 + br.k * 0.5 + X.r * 0.1;
 
   // Bridge vs third blob: the bridge always yields.
   const blobSup = new Float64Array(m);
@@ -235,28 +288,52 @@ function suppressOverlaps(cands, blobs, n, p) {
       const C = blobs[i];
       if (C === c.A || C === c.B) continue;
       if (Math.hypot(C.x - br.cx, C.y - br.cy) > br.bound + C.r + br.k * 2 + 8) continue;
+      // A blob merged with one of the bridge's own blobs is part of its root.
+      const wC = 1 - Math.max(touching(C, c.A, p), touching(C, c.B, p));
+      if (wC <= 0) continue;
       let best = Infinity;
+      const roots = [{ X: c.A, zone: rootZone(br, c.A), w: 1 }, { X: c.B, zone: rootZone(br, c.B), w: 1 }];
       for (let s = 0; s < SAMPLES; s++) {
-        const g = Math.hypot(smp[s * 3] - C.x, smp[s * 3 + 1] - C.y) - C.r - smp[s * 3 + 2];
+        const x = smp[s * 3], y = smp[s * 3 + 1];
+        const g = Math.hypot(x - C.x, y - C.y) - C.r - smp[s * 3 + 2] + rootAllowance(x, y, roots);
         if (g < best) best = g;
       }
-      keep *= 1 - ramp(best, Math.max(br.k, blobK(C.r, p)) * 0.5 + 2);
+      keep *= 1 - wC * ramp(best, Math.max(br.k, blobK(C.r, p)) * 0.3 + 2);
     }
     blobSup[a] = 1 - keep;
   }
 
   // Bridge vs bridge.
-  const over = new Float64Array(m * m); // overlap amount, symmetric
-  const prio = new Float64Array(m * m); // how much [a] yields to [b]
+  const over = new Float64Array(m * m);  // overlap amount, symmetric
+  const prio = new Float64Array(m * m);  // how much [a] yields to [b]
+  const cross = new Float64Array(m * m); // 0 = brushing side by side, 1 = passing through each other
   for (let a = 0; a < m; a++) {
     for (let b = a + 1; b < m; b++) {
       const P = geo[a], Q = geo[b];
       const far = P.br.bound + Q.br.bound + Math.max(P.br.k, Q.br.k) * 2 + 8;
       if (Math.hypot(P.br.cx - Q.br.cx, P.br.cy - Q.br.cy) > far) continue;
-      const o = ramp(bridgeClearance(P.smp, Q.smp), Math.max(P.br.k, Q.br.k) * 0.5 + 2);
+      const ca = live[a], cb = live[b];
+      // Shared blobs, and ends on blobs merged with each other, are roots
+      // where the two bridges may meet.
+      const roots = [];
+      for (const E1 of [ca.A, ca.B]) for (const E2 of [cb.A, cb.B]) {
+        const w = touching(E1, E2, p);
+        if (w <= 0) continue;
+        for (const X of E1 === E2 ? [E1] : [E1, E2]) {
+          roots.push({ X, zone: Math.max(rootZone(P.br, X), rootZone(Q.br, X)), w });
+        }
+      }
+      const clearance = bridgeClearance(P.smp, Q.smp, roots);
+      const o = ramp(clearance, Math.max(P.br.k, Q.br.k) * 0.3 + 2);
       if (o <= 0) continue;
       over[a * m + b] = over[b * m + a] = o;
-      const y = smoothstep(-0.15, 0.15, Q.strength - P.strength);
+      // How deeply the two interpenetrate. A real crossing removes both
+      // bridges unless one is clearly stronger; brushing only moves the weaker.
+      // At a true crossing the clearance is exactly -(both half-widths).
+      const cr = smoothstep(0.3, 0.9, -clearance / Math.max(CLR_W, 1));
+      cross[a * m + b] = cross[b * m + a] = cr;
+      const win = 0.15 + 0.3 * cr;
+      const y = smoothstep(-win, win, Q.strength - P.strength);
       prio[a * m + b] = y;
       prio[b * m + a] = 1 - y;
     }
@@ -270,7 +347,11 @@ function suppressOverlaps(cands, blobs, n, p) {
       let keep = 1 - blobSup[a];
       for (let b = 0; b < m; b++) {
         const o = over[a * m + b];
-        if (o) keep *= 1 - Math.min(1, o * prio[a * m + b] * 2) * (1 - sup[b]);
+        if (!o) continue;
+        // A bridge that is itself giving way pushes others less, except at a
+        // crossing, where both are meant to go.
+        const att = 1 - sup[b] * (1 - cross[a * m + b]);
+        keep *= 1 - Math.min(1, o * prio[a * m + b] * (2 + 2 * cross[a * m + b])) * att;
       }
       next[a] = 1 - keep;
     }
