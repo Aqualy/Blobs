@@ -187,6 +187,39 @@ function sampleBridge(br) {
 }
 
 /**
+ * Bounding data for pruning clearance tests: per segment of the sampled
+ * centre-line [midX, midY, halfLength, maxHalfWidth], then for the whole
+ * bridge [centreX, centreY, radius, maxHalfWidth] in the last four slots.
+ */
+function sampleBounds(smp) {
+  const segs = SAMPLES - 1;
+  const out = new Float64Array(segs * 4 + 4);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, maxW = 0;
+  for (let i = 0; i < segs; i++) {
+    const ax = smp[i * 3], ay = smp[i * 3 + 1], bx = smp[i * 3 + 3], by = smp[i * 3 + 4];
+    out[i * 4] = (ax + bx) * 0.5;
+    out[i * 4 + 1] = (ay + by) * 0.5;
+    out[i * 4 + 2] = Math.hypot(bx - ax, by - ay) * 0.5;
+    out[i * 4 + 3] = Math.max(smp[i * 3 + 2], smp[i * 3 + 5]);
+  }
+  for (let s = 0; s < SAMPLES; s++) {
+    const x = smp[s * 3], y = smp[s * 3 + 1];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+    if (smp[s * 3 + 2] > maxW) maxW = smp[s * 3 + 2];
+  }
+  const cx = (minX + maxX) * 0.5, cy = (minY + maxY) * 0.5;
+  let rad = 0;
+  for (let s = 0; s < SAMPLES; s++) rad = Math.max(rad, Math.hypot(smp[s * 3] - cx, smp[s * 3 + 1] - cy));
+  out[segs * 4] = cx; out[segs * 4 + 1] = cy; out[segs * 4 + 2] = rad; out[segs * 4 + 3] = maxW;
+  return out;
+}
+
+// Pruning is only an optimization: a test is skipped when a lower bound
+// proves it cannot change the result. The slack absorbs rounding.
+const PRUNE_EPS = 1e-7;
+
+/**
  * Extra clearance granted near blobs the bridges legitimately meet at:
  * bridges always join their own blobs, so closeness there is not an overlap.
  * Each root is { X, zone, w }; the allowance fades out gently (over twice
@@ -236,14 +269,41 @@ function segSeg(ax, ay, bx, by, cx, cy, dx, dy) {
  * they interpenetrate), ignoring closeness around a shared root blob.
  */
 let CLR_W = 0; // combined half-widths at the closest approach of the last call
-function bridgeClearance(P, Q, roots) {
+/**
+ * Lower bound of rootAllowance over each segment's bounding circle: the
+ * allowance only shrinks with distance from a root, so evaluate it at the
+ * farthest point the segment can reach.
+ */
+const ALLOW_P = new Float64Array(SAMPLES - 1), ALLOW_Q = new Float64Array(SAMPLES - 1);
+function allowanceBounds(B, roots, out) {
+  for (let i = 0; i < SAMPLES - 1; i++) {
+    let best = 0;
+    for (const r of roots) {
+      const e = Math.hypot(B[i * 4] - r.X.x, B[i * 4 + 1] - r.X.y) + B[i * 4 + 2] - r.X.r;
+      const v = r.w * (r.zone * 2.5 + 10) * (1 - smoothstep(0, r.zone * 2, e + PRUNE_EPS * (1 + Math.abs(e))));
+      if (v > best) best = v;
+    }
+    out[i] = best;
+  }
+}
+
+function bridgeClearance(P, Q, roots, PB, QB) {
   let best = Infinity;
   CLR_W = 0;
+  const rooted = roots.length > 0;
+  if (rooted) { allowanceBounds(PB, roots, ALLOW_P); allowanceBounds(QB, roots, ALLOW_Q); }
   for (let i = 0; i < SAMPLES - 1; i++) {
     const ax = P[i * 3], ay = P[i * 3 + 1], bx = P[i * 3 + 3], by = P[i * 3 + 4];
     for (let j = 0; j < SAMPLES - 1; j++) {
+      // Segment distance >= centre distance - both half-lengths, plus the
+      // smallest root allowance possible there. If that cannot beat best, skip.
+      let lower = Math.hypot(PB[i * 4] - QB[j * 4], PB[i * 4 + 1] - QB[j * 4 + 1])
+        - PB[i * 4 + 2] - QB[j * 4 + 2] - PB[i * 4 + 3] - QB[j * 4 + 3];
+      if (rooted) lower += Math.min(ALLOW_P[i], ALLOW_Q[j]);
+      if (lower - PRUNE_EPS * (1 + Math.abs(lower)) > best) continue;
       const cx = Q[j * 3], cy = Q[j * 3 + 1], dx = Q[j * 3 + 3], dy = Q[j * 3 + 4];
-      const [dist, sc, tc] = segSeg(ax, ay, bx, by, cx, cy, dx, dy);
+      segSeg(ax, ay, bx, by, cx, cy, dx, dy);
+      const dist = SEG[0], sc = SEG[1], tc = SEG[2];
       const pr = P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * sc;
       const qr = Q[j * 3 + 2] + (Q[j * 3 + 5] - Q[j * 3 + 2]) * tc;
       let c = dist - pr - qr;
@@ -272,7 +332,8 @@ function suppressOverlaps(cands, blobs, n, p) {
   if (!m) return;
   const geo = live.map((c) => {
     const br = buildPair(c, c.t, p);
-    return { br, smp: sampleBridge(br), strength: 1 - c.t };
+    const smp = sampleBridge(br);
+    return { br, smp, bounds: sampleBounds(smp), strength: 1 - c.t };
   });
   // Only real contact counts: the ramp starts just before surfaces would
   // visibly web together through the smooth-min fillet.
@@ -312,6 +373,11 @@ function suppressOverlaps(cands, blobs, n, p) {
       const P = geo[a], Q = geo[b];
       const far = P.br.bound + Q.br.bound + Math.max(P.br.k, Q.br.k) * 2 + 8;
       if (Math.hypot(P.br.cx - Q.br.cx, P.br.cy - Q.br.cy) > far) continue;
+      // Clearance can only be at or past the end of the ramp: overlap is 0.
+      const margin = Math.max(P.br.k, Q.br.k) * 0.3 + 2;
+      const S = (SAMPLES - 1) * 4, PB = P.bounds, QB = Q.bounds;
+      const lower = Math.hypot(PB[S] - QB[S], PB[S + 1] - QB[S + 1]) - PB[S + 2] - QB[S + 2] - PB[S + 3] - QB[S + 3];
+      if (lower - PRUNE_EPS * (1 + Math.abs(lower)) > margin * 1.6 + 6) continue;
       const ca = live[a], cb = live[b];
       // Shared blobs, and ends on blobs merged with each other, are roots
       // where the two bridges may meet.
@@ -323,8 +389,8 @@ function suppressOverlaps(cands, blobs, n, p) {
           roots.push({ X, zone: Math.max(rootZone(P.br, X), rootZone(Q.br, X)), w });
         }
       }
-      const clearance = bridgeClearance(P.smp, Q.smp, roots);
-      const o = ramp(clearance, Math.max(P.br.k, Q.br.k) * 0.3 + 2);
+      const clearance = bridgeClearance(P.smp, Q.smp, roots, P.bounds, Q.bounds);
+      const o = ramp(clearance, margin);
       if (o <= 0) continue;
       over[a * m + b] = over[b * m + a] = o;
       // How deeply the two interpenetrate. A real crossing removes both

@@ -1,6 +1,9 @@
 // WebGL2 renderer: evaluates the same field as field.js per pixel.
 import { LIMITS, blobK, COLOR_BAND } from './field.js';
 
+// Width of the tile-list texture (a power of two: the shader uses shifts).
+const LIST_W = 2048;
+
 const VERT = `#version 300 es
 in vec2 aPos;
 void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
@@ -11,6 +14,10 @@ precision highp int;
 precision highp sampler2D;
 
 uniform sampler2D uData;
+uniform highp usampler2D uTiles; // per tile: list offset, blob count | pair count << 16
+uniform highp usampler2D uList;  // concatenated per-tile item indices
+uniform int uTiled;              // 0 = every pixel visits every item
+uniform int uTileSize;           // device px, even so 2x2 derivative quads never straddle tiles
 uniform int uBlobCount;
 uniform int uPairCount;
 uniform float uCanvasH;
@@ -28,6 +35,7 @@ out vec4 outColor;
 const int PAIR_ROW = ${LIMITS.maxBlobs};
 
 vec4 fetch(int row, int col) { return texelFetch(uData, ivec2(col, row), 0); }
+int listAt(int n) { return int(texelFetch(uList, ivec2(n & ${LIST_W - 1}, n >> ${Math.log2(LIST_W)}), 0).r); }
 
 float sminw(float a, float b, float k, out float w) {
   float h = max(k - abs(a - b), 0.0) / k;
@@ -43,8 +51,19 @@ void main() {
   vec3 col = vec3(0.0);
   bool first = true;
 
-  for (int i = 0; i < ${LIMITS.maxBlobs}; i++) {
-    if (i >= uBlobCount) break;
+  // Tile lists only leave out items this loop would skip at every pixel of
+  // the tile anyway, in the same order, so the result is identical.
+  int nBlobs = uBlobCount, nPairs = uPairCount, off = 0;
+  if (uTiled == 1) {
+    uvec2 h = texelFetch(uTiles, ivec2(gl_FragCoord.xy) / uTileSize, 0).xy;
+    off = int(h.x);
+    nBlobs = int(h.y & 0xffffu);
+    nPairs = int(h.y >> 16);
+  }
+
+  for (int n = 0; n < ${LIMITS.maxBlobs}; n++) {
+    if (n >= nBlobs) break;
+    int i = uTiled == 1 ? listAt(off + n) : n;
     vec4 b = fetch(i, 0);
     float di = length(p - b.xy) - b.z;
     float k = b.w;
@@ -56,9 +75,9 @@ void main() {
     first = false;
   }
 
-  for (int j = 0; j < ${LIMITS.maxPairs}; j++) {
-    if (j >= uPairCount) break;
-    int row = PAIR_ROW + j;
+  for (int n = 0; n < ${LIMITS.maxPairs}; n++) {
+    if (n >= nPairs) break;
+    int row = PAIR_ROW + (uTiled == 1 ? listAt(off + nBlobs + n) : n);
     vec4 t3 = fetch(row, 3);   // cx, cy, bound, ib
     float k = fetch(row, 2).y;
     if (length(p - t3.xy) - t3.z > d + k) continue;
@@ -131,11 +150,21 @@ export function hexToRgb(hex) {
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 }
 
+const UNIFORMS = ['uData', 'uTiles', 'uList', 'uTiled', 'uTileSize', 'uBlobCount', 'uPairCount', 'uCanvasH', 'uScale', 'uOffset', 'uBoard', 'uBg', 'uStage', 'uTransparent', 'uChecker', 'uClip'];
+
+/** Aim for about this many tiles: enough to cull well, few enough to build fast. */
+const TARGET_TILES = 2400;
 
 export class Renderer {
-  /** @param {HTMLCanvasElement} canvas */
-  constructor(canvas, { preserve = false } = {}) {
+  /**
+   * @param {HTMLCanvasElement} canvas
+   * @param {{preserve?: boolean, skipUnchanged?: boolean}} [opts]
+   *   skipUnchanged: leave the canvas as it is when a frame is identical to the
+   *   last one drawn (editor only: recording needs every frame drawn).
+   */
+  constructor(canvas, { preserve = false, skipUnchanged = false } = {}) {
     this.canvas = canvas;
+    this.skipUnchanged = skipUnchanged;
     const gl = canvas.getContext('webgl2', {
       antialias: false,
       alpha: true,
@@ -146,6 +175,10 @@ export class Renderer {
     if (!gl) throw new Error('WebGL2 is not available in this browser.');
     this.gl = gl;
     this.lost = false;
+    /** Set false to make every pixel visit every item (for comparisons). */
+    this.tiling = true;
+    /** Counts and timings of the last frame, for profiling. */
+    this.stats = { drawn: false, tiles: 0, listLength: 0, tileMs: 0 };
     canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this.lost = true; });
     canvas.addEventListener('webglcontextrestored', () => { this.lost = false; this._init(); });
     this._init();
@@ -163,9 +196,7 @@ export class Renderer {
     }
     this.prog = prog;
     this.u = {};
-    for (const name of ['uData', 'uBlobCount', 'uPairCount', 'uCanvasH', 'uScale', 'uOffset', 'uBoard', 'uBg', 'uStage', 'uTransparent', 'uChecker', 'uClip']) {
-      this.u[name] = gl.getUniformLocation(prog, name);
-    }
+    for (const name of UNIFORMS) this.u[name] = gl.getUniformLocation(prog, name);
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
     const buf = gl.createBuffer();
@@ -177,14 +208,123 @@ export class Renderer {
 
     this.rows = LIMITS.maxBlobs + LIMITS.maxPairs;
     this.data = new Float32Array(this.rows * 4 * 4);
+    this.tex = this._texture();
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 4, this.rows, 0, gl.RGBA, gl.FLOAT, this.data);
+
+    this.tileTex = this._texture();
+    this.tileDims = [0, 0];
+    this.tileSize = 16;
+    this.listTex = this._texture();
+    this.listRows = 0;
+    this.maxListRows = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE), 4096);
+    this.list = new Uint16Array(LIST_W * 16);
+    this.header = new Uint32Array(0);
+    this.last = null; // the last drawn frame, for skipUnchanged
+  }
+
+  _texture() {
+    const gl = this.gl;
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 4, this.rows, 0, gl.RGBA, gl.FLOAT, this.data);
-    this.tex = tex;
+    return tex;
+  }
+
+  /**
+   * Builds the per-tile item lists. An item is left out of a tile only when
+   * the shader's own early-out would skip it at every pixel of that tile:
+   *  - blob i: its nearest distance over the tile exceeds the farthest
+   *    distance of some earlier blob plus its fillet k (the running field
+   *    value is never above any earlier blob's distance);
+   *  - bridge: its bounding-circle distance exceeds the farthest distance of
+   *    any blob plus its k.
+   * Order is kept, so every pixel does exactly the same arithmetic as
+   * without tiles. Tiles wholly outside a clipped artboard get no items:
+   * those pixels show the stage colour whatever the field is.
+   * Returns the list length, or -1 when the lists would not fit.
+   */
+  _buildTiles(nb, np, view, board, W, H, clip) {
+    const T = Math.max(16, 2 * Math.ceil(Math.sqrt((W * H) / TARGET_TILES) / 2));
+    const cols = Math.ceil(W / T), rows = Math.ceil(H / T);
+    const D = this.data;
+    const s = view.scale, ox = view.ox, oy = view.oy;
+    const pad = 1 / s; // one device pixel of slack around each tile
+    const base = LIMITS.maxBlobs * 16;
+    if (this.header.length < cols * rows * 2) this.header = new Uint32Array(cols * rows * 2);
+    const header = this.header;
+    const cap = LIST_W * this.maxListRows;
+    let list = this.list;
+    let len = 0;
+    const outX0 = -0.5 / s, outX1 = board.w + 0.5 / s, outY0 = -0.5 / s, outY1 = board.h + 0.5 / s;
+
+    for (let ty = 0; ty < rows; ty++) {
+      // Tile rows follow gl_FragCoord (bottom-up); frag y is top-down.
+      const y0 = (H - (ty + 1) * T - oy) / s - pad;
+      const y1 = (H - ty * T - oy) / s + pad;
+      for (let tx = 0; tx < cols; tx++) {
+        const x0 = (tx * T - ox) / s - pad;
+        const x1 = ((tx + 1) * T - ox) / s + pad;
+        const h = (ty * cols + tx) * 2;
+        header[h] = len;
+        if (clip && (x1 < outX0 || x0 > outX1 || y1 < outY0 || y0 > outY1)) { header[h + 1] = 0; continue; }
+        if (len + nb + np > cap) return -1; // would not fit the texture: draw untiled
+        if (len + nb + np > list.length) {
+          const grown = new Uint16Array(Math.min(cap, Math.max(list.length * 2, len + nb + np)));
+          grown.set(list.subarray(0, len));
+          list = this.list = grown;
+        }
+        let ub = Infinity, kb = 0;
+        for (let i = 0; i < nb; i++) {
+          const o = i * 16;
+          const bx = D[o], by = D[o + 1], r = D[o + 2], k = D[o + 3];
+          const ex = bx < x0 ? x0 - bx : bx > x1 ? bx - x1 : 0;
+          const ey = by < y0 ? y0 - by : by > y1 ? by - y1 : 0;
+          const lb = Math.sqrt(ex * ex + ey * ey) - r;
+          if (i === 0 || lb <= ub + k + tol(lb, ub, k)) { list[len++] = i; kb++; }
+          const fx = Math.max(Math.abs(bx - x0), Math.abs(bx - x1));
+          const fy = Math.max(Math.abs(by - y0), Math.abs(by - y1));
+          const far = Math.sqrt(fx * fx + fy * fy) - r;
+          if (far < ub) ub = far;
+        }
+        let kp = 0;
+        for (let j = 0; j < np; j++) {
+          const o = base + j * 16;
+          const cx = D[o + 12], cy = D[o + 13], bound = D[o + 14], k = D[o + 9];
+          const ex = cx < x0 ? x0 - cx : cx > x1 ? cx - x1 : 0;
+          const ey = cy < y0 ? y0 - cy : cy > y1 ? cy - y1 : 0;
+          const lb = Math.sqrt(ex * ex + ey * ey) - bound;
+          if (lb <= ub + k + tol(lb, ub, k)) { list[len++] = j; kp++; }
+        }
+        header[h + 1] = kb | (kp << 16);
+      }
+    }
+
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.tileTex);
+    if (this.tileDims[0] !== cols || this.tileDims[1] !== rows) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32UI, cols, rows, 0, gl.RG_INTEGER, gl.UNSIGNED_INT, header, 0);
+      this.tileDims = [cols, rows];
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, cols, rows, gl.RG_INTEGER, gl.UNSIGNED_INT, header, 0);
+    }
+    const usedRows = Math.max(1, Math.ceil(len / LIST_W));
+    if (list.length < usedRows * LIST_W) {
+      const grown = new Uint16Array(usedRows * LIST_W);
+      grown.set(list.subarray(0, len));
+      list = this.list = grown;
+    }
+    gl.bindTexture(gl.TEXTURE_2D, this.listTex);
+    if (usedRows > this.listRows) {
+      this.listRows = Math.min(this.maxListRows, Math.max(usedRows, this.listRows * 2, 16));
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R16UI, LIST_W, this.listRows, 0, gl.RED_INTEGER, gl.UNSIGNED_SHORT, null);
+    }
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, LIST_W, usedRows, gl.RED_INTEGER, gl.UNSIGNED_SHORT, list, 0);
+    this.stats.tiles = cols * rows;
+    this.tileSize = T;
+    return len;
   }
 
   /**
@@ -194,9 +334,10 @@ export class Renderer {
    * @param {object} frame.params
    * @param {{scale:number, ox:number, oy:number}} frame.view device-pixel transform
    * @param {{w:number,h:number}} frame.board
+   * @returns {boolean} whether anything was drawn
    */
   render(frame) {
-    if (this.lost) return;
+    if (this.lost) return false;
     const gl = this.gl;
     const { blobs, pairs, params, view, board } = frame;
     const nb = Math.min(blobs.length, LIMITS.maxBlobs);
@@ -219,29 +360,79 @@ export class Renderer {
       D[o + 12] = p.cx; D[o + 13] = p.cy; D[o + 14] = p.bound; D[o + 15] = p.ib;
     }
 
+    const W = this.canvas.width, H = this.canvas.height;
+    const bg = hexToRgb(frame.background);
+    const st = hexToRgb(frame.stage || '#0f0f10');
+    const clip = frame.clip !== false;
+    const sig = [W, H, nb, np, view.scale, view.ox, view.oy, board.w, board.h, ...bg, ...st,
+      frame.transparent ? 1 : 0, frame.checker ? 1 : 0, clip ? 1 : 0, this.tiling ? 1 : 0];
+    if (this.skipUnchanged && this.last && sameFrame(this.last, sig, D, nb, np)) {
+      this.stats.drawn = false;
+      return false;
+    }
+
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     if (nb > 0) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 4, nb, gl.RGBA, gl.FLOAT, D, 0);
     if (np > 0) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, LIMITS.maxBlobs, 4, np, gl.RGBA, gl.FLOAT, D, base);
 
-    const W = this.canvas.width, H = this.canvas.height;
+    const t0 = performance.now();
+    const len = this.tiling ? this._buildTiles(nb, np, view, board, W, H, clip) : -1;
+    this.stats.tileMs = performance.now() - t0;
+    this.stats.listLength = Math.max(len, 0);
+    const tiled = len >= 0;
+
     gl.viewport(0, 0, W, H);
     gl.useProgram(this.prog);
     gl.bindVertexArray(this.vao);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.tileTex);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.listTex);
     gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.uniform1i(this.u.uData, 0);
+    gl.uniform1i(this.u.uTiles, 1);
+    gl.uniform1i(this.u.uList, 2);
+    gl.uniform1i(this.u.uTiled, tiled ? 1 : 0);
+    gl.uniform1i(this.u.uTileSize, tiled ? this.tileSize : 1);
     gl.uniform1i(this.u.uBlobCount, nb);
     gl.uniform1i(this.u.uPairCount, np);
     gl.uniform1f(this.u.uCanvasH, H);
     gl.uniform1f(this.u.uScale, view.scale);
     gl.uniform2f(this.u.uOffset, view.ox, view.oy);
     gl.uniform2f(this.u.uBoard, board.w, board.h);
-    const bg = hexToRgb(frame.background);
     gl.uniform3f(this.u.uBg, bg[0], bg[1], bg[2]);
-    const st = hexToRgb(frame.stage || '#0f0f10');
     gl.uniform3f(this.u.uStage, st[0], st[1], st[2]);
     gl.uniform1f(this.u.uTransparent, frame.transparent ? 1 : 0);
     gl.uniform1f(this.u.uChecker, frame.checker ? 1 : 0);
-    gl.uniform1f(this.u.uClip, frame.clip === false ? 0 : 1);
+    gl.uniform1f(this.u.uClip, clip ? 1 : 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    if (this.skipUnchanged) this.last = remember(this.last, sig, D);
+    this.stats.drawn = true;
+    return true;
   }
+
+  /** Forget the last frame, so the next render always draws. */
+  invalidate() { this.last = null; }
+}
+
+/** Float32 slack for the culling comparisons (culling less is always safe). */
+function tol(a, b, k) {
+  return 1e-3 + 2e-5 * (Math.abs(a) + (b === Infinity ? 0 : Math.abs(b)) + k);
+}
+
+function sameFrame(last, sig, D, nb, np) {
+  if (last.sig.length !== sig.length) return false;
+  for (let i = 0; i < sig.length; i++) if (last.sig[i] !== sig[i]) return false;
+  const base = LIMITS.maxBlobs * 16;
+  for (let i = 0, n = nb * 16; i < n; i++) if (last.data[i] !== D[i]) return false;
+  for (let i = base, n = base + np * 16; i < n; i++) if (last.data[i] !== D[i]) return false;
+  return true;
+}
+
+function remember(last, sig, D) {
+  const data = last?.data || new Float32Array(D.length);
+  data.set(D);
+  return { sig, data };
 }

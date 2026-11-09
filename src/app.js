@@ -1,12 +1,16 @@
 // Blobs — editor application.
-import { DEFAULT_PARAMS, PARAM_RANGES, LIMITS } from './field.js';
+import { DEFAULT_PARAMS, LIMITS } from './field.js';
 import {
-  PALETTE, BOARD_PRESETS, MOTION_TYPES, PRESETS,
+  PALETTE, BOARD_PRESETS, PRESETS,
   emptyDoc, normalizeDoc, makeBlob, nextBlobId, isAnimated,
 } from './model.js';
 import { Renderer } from './renderer.js';
 import { frameAt } from './scene.js';
 import { exportPNG, exportSVG, recordVideo, videoSupport, download } from './export.js';
+import { store, notify } from './ui/store.js';
+import './ui/topbar.js';
+import './ui/panel.js';
+import './ui/dialogs.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -30,8 +34,6 @@ const state = {
   autoFit: true,
   lastRadius: null,
   lastColor: PALETTE[0],
-  pngScale: 1,
-  exporting: null,
 };
 
 // ---------------------------------------------------------------- dom
@@ -39,6 +41,8 @@ const stage = $('#stage');
 const glCanvas = $('#gl');
 const overlay = $('#overlay');
 const octx = overlay.getContext('2d');
+const toasts = $('bl-toasts');
+const exportDialog = $('bl-export-dialog');
 let renderer = null;
 let dpr = 1;
 
@@ -49,19 +53,17 @@ function fatal(msg) {
 }
 
 try {
-  renderer = new Renderer(glCanvas);
+  // The overlay is a separate canvas, so selection and hover changes leave
+  // an unchanged blob frame alone.
+  renderer = new Renderer(glCanvas, { skipUnchanged: true });
 } catch (err) {
   console.error(err);
   fatal('Blobs needs WebGL2, which is not available here. Try an up-to-date Chrome, Edge, Firefox or Safari, and make sure hardware acceleration is enabled.');
 }
 
 // ---------------------------------------------------------------- toasts
-function toast(msg, { error = false, ms = 2600 } = {}) {
-  const el = document.createElement('div');
-  el.className = 'toast' + (error ? ' error' : '');
-  el.textContent = msg;
-  $('#toasts').appendChild(el);
-  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, ms);
+function toast(msg, opts) {
+  toasts.show(msg, opts);
 }
 
 // ---------------------------------------------------------------- history
@@ -74,7 +76,7 @@ function commit() {
   history.stack.push(snap);
   if (history.stack.length > 300) history.stack.shift();
   history.index = history.stack.length - 1;
-  updateUndoButtons();
+  notify();
   scheduleSave();
 }
 
@@ -83,18 +85,13 @@ function restore(snap) {
   const ids = new Set(doc.blobs.map((b) => b.id));
   for (const id of [...state.selection]) if (!ids.has(id)) state.selection.delete(id);
   state.time = state.time % doc.loop;
-  syncPanel();
-  updateUndoButtons();
+  notify();
   scheduleSave();
   requestRender();
 }
 
 function undo() { if (history.index > 0) restore(history.stack[--history.index]); }
 function redo() { if (history.index < history.stack.length - 1) restore(history.stack[++history.index]); }
-function updateUndoButtons() {
-  $('#undo').disabled = history.index <= 0;
-  $('#redo').disabled = history.index >= history.stack.length - 1;
-}
 
 // ---------------------------------------------------------------- persistence
 let saveTimer = 0;
@@ -150,7 +147,7 @@ function fitView() {
   state.view.x = (w - doc.board.w * zoom) / 2;
   state.view.y = (h - doc.board.h * zoom) / 2;
   state.autoFit = true;
-  updateZoomLabel();
+  notify();
   requestRender();
 }
 function zoomAt(sx, sy, factor) {
@@ -161,13 +158,9 @@ function zoomAt(sx, sy, factor) {
   v.y = sy - (sy - v.y) * f;
   v.zoom = z;
   state.autoFit = false;
-  updateZoomLabel();
+  notify();
   requestRender();
 }
-function updateZoomLabel() {
-  $('#zoom-label').textContent = Math.round(state.view.zoom * 100) + '%';
-}
-
 function resize() {
   dpr = Math.min(window.devicePixelRatio || 1, 2);
   const { w, h } = stageSize();
@@ -209,9 +202,15 @@ function loop(ts) {
   if (state.playing) requestRender();
 }
 
+// Timings of the last frame, read with window.blobs.stats().
+const perf = { sceneMs: 0, renderMs: 0 };
+
 function draw() {
   if (!doc) return;
+  const t0 = performance.now();
   const fr = frameAt(doc, state.time);
+  const t1 = performance.now();
+  perf.sceneMs = t1 - t0;
   state.frame = fr;
   if (renderer) {
     const v = state.view;
@@ -225,9 +224,10 @@ function draw() {
       clip: true,
       stage: STAGE_COLOR,
     });
+    perf.renderMs = performance.now() - t1;
   }
   drawOverlay(fr);
-  updateClock();
+  notify('time');
 }
 
 const KNOB_ANGLE = -Math.PI / 4;
@@ -322,14 +322,6 @@ function drawOverlay(fr) {
   }
 }
 
-function updateClock() {
-  $('#clock').textContent = state.time.toFixed(2) + 's';
-  if (!state.scrubbing) $('#scrub').value = String(Math.round((state.time / doc.loop) * 1000));
-  const btn = $('#play');
-  btn.classList.toggle('playing', state.playing);
-  btn.setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
-}
-
 // ---------------------------------------------------------------- hit testing
 function hitBlob(sx, sy) {
   const p = screenToBoard(sx, sy);
@@ -362,7 +354,7 @@ function addBlob(x, y) {
   doc.blobs.push(b);
   state.selection = new Set([b.id]);
   commit();
-  syncPanel();
+  notify();
   requestRender();
   dismissHint();
 }
@@ -378,7 +370,7 @@ function deleteSelection() {
   doc.blobs = doc.blobs.filter((b) => !state.selection.has(b.id));
   state.selection.clear();
   commit();
-  syncPanel();
+  notify();
   requestRender();
 }
 function duplicateSelection(offset = true) {
@@ -409,7 +401,7 @@ function setBoardSize(w, h) {
   for (const b of doc.blobs) { b.x = round2(b.x + dx); b.y = round2(b.y + dy); }
   doc.board = { w, h };
   commit();
-  syncPanel();
+  notify();
   fitView();
 }
 function loadDoc(d, { fit = true, record = true } = {}) {
@@ -418,7 +410,7 @@ function loadDoc(d, { fit = true, record = true } = {}) {
   state.time = 0;
   state.lastRadius = null;
   if (record) commit();
-  syncPanel();
+  notify();
   if (fit) fitView();
   setPlaying(isAnimated(doc));
   requestRender();
@@ -486,7 +478,7 @@ overlay.addEventListener('pointerdown', (e) => {
   const id = hitBlob(pt.x, pt.y);
   if (id != null) {
     if (e.shiftKey) {
-      if (state.selection.has(id)) { state.selection.delete(id); syncPanel(); requestRender(); return; }
+      if (state.selection.has(id)) { state.selection.delete(id); notify(); requestRender(); return; }
       state.selection.add(id);
     } else if (!state.selection.has(id)) {
       state.selection = new Set([id]);
@@ -500,7 +492,7 @@ overlay.addEventListener('pointerdown', (e) => {
       changed: dup,
     };
     setCursor('grabbing');
-    syncPanel();
+    notify();
     requestRender();
     return;
   }
@@ -510,7 +502,7 @@ overlay.addEventListener('pointerdown', (e) => {
     type: 'marquee', ax: pt.x, ay: pt.y, bx: pt.x, by: pt.y,
     base: e.shiftKey ? new Set(state.selection) : new Set(),
   };
-  if (!e.shiftKey && state.selection.size) { state.selection.clear(); syncPanel(); }
+  if (!e.shiftKey && state.selection.size) { state.selection.clear(); notify(); }
   requestRender();
 });
 
@@ -529,7 +521,7 @@ overlay.addEventListener('pointermove', (e) => {
     state.autoFit = false;
     state.view.x = mid.x - (pinch.mid.x - pinch.view.x) * f;
     state.view.y = mid.y - (pinch.mid.y - pinch.view.y) * f;
-    updateZoomLabel();
+    notify();
     requestRender();
     return;
   }
@@ -565,7 +557,7 @@ overlay.addEventListener('pointermove', (e) => {
       if (r0 != null) b.r = clamp(r0 * f, 2, 2000);
     }
     d.changed = true;
-    syncSelectionFields();
+    notify();
     requestRender();
   } else if (d.type === 'marquee') {
     d.bx = pt.x; d.by = pt.y;
@@ -578,7 +570,7 @@ overlay.addEventListener('pointermove', (e) => {
       if (Math.hypot(bl.x - cx, bl.y - cy) <= bl.r) sel.add(bl.id);
     }
     state.selection = sel;
-    syncPanel();
+    notify();
     requestRender();
   }
 });
@@ -594,7 +586,7 @@ function endDrag(record = true) {
       if (first) state.lastRadius = first.r;
     }
     if (record) commit();
-    syncPanel();
+    notify();
   }
   setCursor(state.spaceDown ? 'grab' : 'default');
   requestRender();
@@ -636,20 +628,27 @@ overlay.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // ---------------------------------------------------------------- keyboard
+/** The focused element, looking inside the components' shadow roots. */
+function deepActive() {
+  let el = document.activeElement;
+  while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+  return el;
+}
 const isTyping = (el) => el && (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA' || el.isContentEditable)
   && !(el.type === 'range' || el.type === 'checkbox');
 
 window.addEventListener('keydown', (e) => {
-  if (!doc || $('#export-dialog').open) return;
+  if (!doc || store.modal) return;
   const mod = e.ctrlKey || e.metaKey;
-  const typing = isTyping(document.activeElement);
+  const focused = deepActive();
+  const typing = isTyping(focused);
   if (typing && e.key !== 'Escape') return;
   const k = e.key;
 
   if (mod && (k === 'z' || k === 'Z')) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (mod && (k === 'y' || k === 'Y')) { e.preventDefault(); redo(); return; }
-  if (mod && (k === 'd' || k === 'D')) { e.preventDefault(); if (duplicateSelection().length) { commit(); syncPanel(); requestRender(); } return; }
-  if (mod && (k === 'a' || k === 'A')) { e.preventDefault(); state.selection = new Set(doc.blobs.map((b) => b.id)); syncPanel(); requestRender(); return; }
+  if (mod && (k === 'd' || k === 'D')) { e.preventDefault(); if (duplicateSelection().length) { commit(); notify(); requestRender(); } return; }
+  if (mod && (k === 'a' || k === 'A')) { e.preventDefault(); state.selection = new Set(doc.blobs.map((b) => b.id)); notify(); requestRender(); return; }
   if (mod && (k === 's' || k === 'S')) { e.preventDefault(); saveJSON(); return; }
   if (mod) return;
 
@@ -659,7 +658,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); deleteSelection(); return; }
-  if (k === 'Escape') { if (typing) document.activeElement.blur(); state.selection.clear(); syncPanel(); requestRender(); return; }
+  if (k === 'Escape') { if (typing) focused.blur(); state.selection.clear(); notify(); requestRender(); return; }
   if (k === 'a' || k === 'A' || k === 'n' || k === 'N') { addBlobAtCenter(); return; }
   if (k === 'f' || k === 'F' || k === '0') { fitView(); return; }
   if (k === '+' || k === '=') { const s = stageSize(); zoomAt(s.w / 2, s.h / 2, 1.25); return; }
@@ -668,7 +667,7 @@ window.addEventListener('keydown', (e) => {
   if ((k === '[' || k === ']') && state.selection.size) {
     const f = k === ']' ? 1.06 : 1 / 1.06;
     for (const b of selectedBlobs()) b.r = round2(clamp(b.r * f, 2, 2000));
-    commit(); syncSelectionFields(); requestRender();
+    commit(); notify(); requestRender();
     return;
   }
   const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
@@ -685,299 +684,12 @@ window.addEventListener('keyup', (e) => {
     const wasSpace = state.spaceDown;
     state.spaceDown = false;
     setCursor('default');
-    if (wasSpace && !state.spaceUsed && !isTyping(document.activeElement)) setPlaying(!state.playing);
+    if (wasSpace && !state.spaceUsed && !isTyping(deepActive())) setPlaying(!state.playing);
   }
 });
 window.addEventListener('blur', () => { state.spaceDown = false; });
 
-// ---------------------------------------------------------------- panel widgets
-function fmt(v, step) {
-  const dec = step >= 1 ? 0 : step >= 0.1 ? 1 : 2;
-  return Number(v).toFixed(dec);
-}
-
-/** Range + number pair bound to getter/setter. */
-function slider(row, { label, min, max, step, get, set, numMax }) {
-  row.innerHTML = '';
-  const l = document.createElement('span');
-  l.className = 'lbl';
-  l.textContent = label;
-  const range = document.createElement('input');
-  range.type = 'range';
-  Object.assign(range, { min, max, step });
-  range.setAttribute('aria-label', label);
-  const number = document.createElement('input');
-  number.type = 'number';
-  Object.assign(number, { min, max: numMax ?? max, step });
-  number.setAttribute('aria-label', label);
-  row.append(l, range, number);
-  const apply = (v, src) => {
-    if (!Number.isFinite(v)) return;
-    v = clamp(v, min, numMax ?? max);
-    set(v);
-    if (src !== range) range.value = String(v);
-    if (src !== number) number.value = fmt(v, step);
-    requestRender();
-  };
-  range.addEventListener('input', () => apply(parseFloat(range.value), range));
-  range.addEventListener('change', () => commit());
-  number.addEventListener('input', () => { if (number.value !== '') apply(parseFloat(number.value), number); });
-  number.addEventListener('change', () => { apply(parseFloat(number.value), null); commit(); });
-  return {
-    update() {
-      const v = get();
-      if (v == null) return;
-      if (document.activeElement !== range) range.value = String(v);
-      if (document.activeElement !== number) number.value = fmt(v, step);
-    },
-    row,
-  };
-}
-
-function swatchPicker(container, { get, set }) {
-  container.innerHTML = '';
-  const buttons = PALETTE.map((c) => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'sw';
-    b.style.background = c;
-    b.title = c;
-    b.setAttribute('aria-label', 'Color ' + c);
-    b.addEventListener('click', () => { set(c); commit(); update(); requestRender(); });
-    container.appendChild(b);
-    return [c, b];
-  });
-  const custom = document.createElement('label');
-  custom.className = 'sw sw-custom';
-  custom.title = 'Custom color';
-  const input = document.createElement('input');
-  input.type = 'color';
-  input.setAttribute('aria-label', 'Custom color');
-  custom.appendChild(input);
-  container.appendChild(custom);
-  const hex = document.createElement('input');
-  hex.type = 'text';
-  hex.className = 'hex';
-  hex.maxLength = 7;
-  hex.spellcheck = false;
-  hex.setAttribute('aria-label', 'Hex color');
-  container.appendChild(hex);
-
-  input.addEventListener('input', () => { set(input.value.toLowerCase()); update(true); requestRender(); });
-  input.addEventListener('change', () => commit());
-  hex.addEventListener('change', () => {
-    let v = hex.value.trim().toLowerCase();
-    if (!v.startsWith('#')) v = '#' + v;
-    if (/^#[0-9a-f]{3}$/.test(v)) v = '#' + [...v.slice(1)].map((c) => c + c).join('');
-    if (/^#[0-9a-f]{6}$/.test(v)) { set(v); commit(); requestRender(); }
-    update();
-  });
-  function update(fromPicker) {
-    const v = get();
-    if (v == null) return;
-    for (const [c, b] of buttons) b.classList.toggle('on', c === v);
-    custom.classList.toggle('on', !PALETTE.includes(v));
-    if (!fromPicker) input.value = v;
-    if (document.activeElement !== hex) hex.value = v;
-  }
-  return { update };
-}
-
-// Bridge parameters
-const PARAM_LABELS = {
-  reach: 'Reach', snap: 'Snap point', thickness: 'Thickness', flare: 'Flare',
-  taper: 'Taper', smooth: 'Smoothness', organic: 'Organic',
-};
-const PARAM_TIPS = {
-  reach: 'How far apart blobs can be (× their radius) before the bridge is gone',
-  snap: 'Where along the reach the neck pinches off and retracts',
-  thickness: 'Neck thickness when blobs are close',
-  flare: 'How wide a bridge is where it grows out of a blob',
-  taper: 'Higher keeps the neck thin for longer, with a sharper flare',
-  smooth: 'Size of the fillets where bridges meet blobs',
-  organic: 'Per-bridge bend and asymmetry',
-};
-const paramWidgets = Object.keys(PARAM_RANGES).map((key) => {
-  const [min, max, step] = PARAM_RANGES[key];
-  const row = $(`[data-param="${key}"]`);
-  row.title = PARAM_TIPS[key];
-  return slider(row, {
-    label: PARAM_LABELS[key], min, max, step,
-    get: () => doc.params[key],
-    set: (v) => { doc.params[key] = v; },
-  });
-});
-$('#no-overlap').addEventListener('change', (e) => {
-  doc.params.noOverlap = e.target.checked;
-  commit(); requestRender();
-});
-$('#params-reset').addEventListener('click', () => {
-  doc.params = { ...DEFAULT_PARAMS, noOverlap: doc.params.noOverlap };
-  commit(); syncPanel(); requestRender();
-});
-
-// Selection widgets
-function forSel(fn) { for (const b of selectedBlobs()) fn(b); }
-const firstSel = () => selectedBlobs()[0];
-
-const radiusWidget = slider($('[data-blob="r"]'), {
-  label: 'Radius', min: 4, max: 600, step: 1, numMax: 2000,
-  get: () => firstSel()?.r,
-  set: (v) => { forSel((b) => { b.r = v; }); state.lastRadius = v; },
-});
-const MOTION_FIELDS = {
-  amp: { label: 'Distance', min: 0, max: 600, step: 1, numMax: 2000 },
-  cycles: { label: 'Speed', min: 1, max: 8, step: 1, numMax: 12 },
-  phase: { label: 'Offset', min: 0, max: 1, step: 0.01 },
-  angle: { label: 'Angle', min: -180, max: 180, step: 1 },
-  pulse: { label: 'Pulse', min: 0, max: 0.6, step: 0.01 },
-};
-const MOTION_TIPS = {
-  amp: 'How far the blob travels',
-  cycles: 'Repeats per loop — whole numbers keep videos seamless',
-  phase: 'Shift this blob in time relative to others',
-  angle: 'Direction of the swing',
-  pulse: 'Breathing: grows and shrinks the radius',
-};
-const motionWidgets = Object.entries(MOTION_FIELDS).map(([key, cfg]) => {
-  const row = $(`[data-motion="${key}"]`);
-  row.title = MOTION_TIPS[key];
-  const w = slider(row, {
-    ...cfg,
-    get: () => firstSel()?.motion[key],
-    set: (v) => forSel((b) => { b.motion[key] = key === 'cycles' ? Math.round(v) : v; }),
-  });
-  w.key = key;
-  return w;
-});
-
-const motionSeg = $('#motion-type');
-MOTION_TYPES.forEach((t) => {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.dataset.v = t.id;
-  b.textContent = t.label;
-  b.setAttribute('role', 'radio');
-  b.addEventListener('click', () => {
-    forSel((bl) => {
-      bl.motion.type = t.id;
-      if (t.id === 'orbit' && Math.abs(bl.motion.angle) > 1) bl.motion.angle = 1;
-      if (t.id === 'swing' && Math.abs(bl.motion.angle) <= 1) bl.motion.angle = 0;
-    });
-    commit(); syncPanel(); requestRender();
-    if (t.id !== 'none' && !state.playing) setPlaying(true);
-  });
-  motionSeg.appendChild(b);
-});
-
-// Orbit direction (stored as the sign of motion.angle)
-const dirRow = document.createElement('div');
-dirRow.className = 'row';
-dirRow.innerHTML = '<span class="lbl">Direction</span><div class="seg"><button type="button" data-v="1">Clockwise</button><button type="button" data-v="-1">Counter</button></div>';
-$('[data-motion="angle"]').after(dirRow);
-dirRow.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
-  forSel((bl) => { bl.motion.angle = Number(b.dataset.v); });
-  commit(); syncPanel(); requestRender();
-}));
-
-const blobColor = swatchPicker($('#blob-swatches'), {
-  get: () => firstSel()?.color,
-  set: (c) => { forSel((b) => { b.color = c; }); state.lastColor = c; },
-});
-
-$('#btn-dup').addEventListener('click', () => { if (duplicateSelection().length) { commit(); syncPanel(); requestRender(); } });
-$('#btn-del').addEventListener('click', deleteSelection);
-$('#btn-front').addEventListener('click', bringToFront);
-
-// Canvas widgets
-const boardSelect = $('#board-preset');
-for (const p of BOARD_PRESETS) boardSelect.add(new Option(p.label, p.id));
-boardSelect.add(new Option('Custom', 'custom'));
-boardSelect.addEventListener('change', () => {
-  const p = BOARD_PRESETS.find((x) => x.id === boardSelect.value);
-  if (p) setBoardSize(p.w, p.h);
-});
-$('#board-w').addEventListener('change', (e) => setBoardSize(parseFloat(e.target.value), doc.board.h));
-$('#board-h').addEventListener('change', (e) => setBoardSize(doc.board.w, parseFloat(e.target.value)));
-const bgColor = swatchPicker($('#bg-swatches'), {
-  get: () => doc.background,
-  set: (c) => { doc.background = c; },
-});
-$('#transparent').addEventListener('change', (e) => { doc.transparent = e.target.checked; commit(); requestRender(); });
-const loopWidget = slider($('[data-doc="loop"]'), {
-  label: 'Loop', min: 1, max: 30, step: 0.5, numMax: 60,
-  get: () => doc.loop,
-  set: (v) => { doc.loop = v; state.time = state.time % v; },
-});
-$('[data-doc="loop"]').title = 'Length of one seamless animation loop, in seconds';
-
-function syncSelectionFields() {
-  radiusWidget.update();
-  motionWidgets.forEach((w) => w.update());
-}
-
-function syncPanel() {
-  if (!doc) return;
-  const sel = selectedBlobs();
-  const n = sel.length;
-  $('#sel-count').textContent = n === 0 ? 'Nothing selected' : n === 1 ? '1 blob' : `${n} blobs`;
-  $('#sel-empty').hidden = n > 0;
-  $('#sel-body').hidden = n === 0;
-  if (n) {
-    const m = sel[0].motion;
-    motionSeg.querySelectorAll('button').forEach((b) => {
-      const on = b.dataset.v === m.type;
-      b.classList.toggle('on', on);
-      b.setAttribute('aria-checked', String(on));
-    });
-    $('#motion-body').hidden = m.type === 'none';
-    $('[data-motion="angle"]').hidden = m.type !== 'swing';
-    dirRow.hidden = m.type !== 'orbit';
-    dirRow.querySelectorAll('button').forEach((b) => b.classList.toggle('on', Number(b.dataset.v) === (m.angle < 0 ? -1 : 1)));
-    syncSelectionFields();
-    blobColor.update();
-  }
-  paramWidgets.forEach((w) => w.update());
-  $('#no-overlap').checked = !!doc.params.noOverlap;
-  loopWidget.update();
-  bgColor.update();
-  $('#transparent').checked = doc.transparent;
-  const bp = BOARD_PRESETS.find((p) => p.w === doc.board.w && p.h === doc.board.h);
-  boardSelect.value = bp ? bp.id : 'custom';
-  $('#board-w').value = doc.board.w;
-  $('#board-h').value = doc.board.h;
-}
-
-// ---------------------------------------------------------------- top bar
-const presetSelect = $('#preset');
-PRESETS.forEach((p, i) => presetSelect.add(new Option(p.name, String(i))));
-presetSelect.addEventListener('change', () => {
-  const p = PRESETS[Number(presetSelect.value)];
-  presetSelect.selectedIndex = 0;
-  if (p) loadDoc(normalizeDoc(p.build()));
-  presetSelect.blur();
-});
-$('#undo').addEventListener('click', undo);
-$('#redo').addEventListener('click', redo);
-$('#play').addEventListener('click', () => {
-  setPlaying(!state.playing);
-  if (state.playing && !isAnimated(doc)) toast('Nothing moves yet — pick a motion for a blob in the panel.');
-});
-const scrub = $('#scrub');
-scrub.addEventListener('pointerdown', () => { state.scrubbing = true; });
-scrub.addEventListener('input', () => {
-  state.playing = false;
-  state.time = (Number(scrub.value) / 1000) * doc.loop * 0.99999;
-  requestRender();
-});
-const endScrub = () => { state.scrubbing = false; };
-scrub.addEventListener('pointerup', endScrub);
-scrub.addEventListener('change', endScrub);
-$('#btn-add').addEventListener('click', addBlobAtCenter);
-$('#zoom-in').addEventListener('click', () => { const s = stageSize(); zoomAt(s.w / 2, s.h / 2, 1.25); });
-$('#zoom-out').addEventListener('click', () => { const s = stageSize(); zoomAt(s.w / 2, s.h / 2, 0.8); });
-$('#zoom-label').addEventListener('click', fitView);
-
+// ---------------------------------------------------------------- hint
 let hintTimer = 0;
 function dismissHint() {
   const h = $('#hint');
@@ -1006,30 +718,6 @@ async function openFile(file) {
     toast('That file is not a valid blob composition.', { error: true });
   }
 }
-$('#btn-new').addEventListener('click', () => {
-  const d = emptyDoc();
-  d.board = { ...doc.board };
-  d.background = doc.background;
-  loadDoc(d);
-});
-$('#btn-open').addEventListener('click', () => $('#file-input').click());
-$('#file-input').addEventListener('change', (e) => {
-  const f = e.target.files?.[0];
-  if (f) openFile(f);
-  e.target.value = '';
-});
-$('#btn-save').addEventListener('click', saveJSON);
-$('#btn-link').addEventListener('click', async () => {
-  try {
-    const code = await encodeDoc(doc);
-    const url = `${location.origin}${location.pathname}#d=${code}`;
-    await navigator.clipboard.writeText(url);
-    toast('Link copied — anyone with it opens this composition.');
-  } catch (err) {
-    console.error(err);
-    toast('Could not copy the link in this browser.', { error: true });
-  }
-});
 stage.addEventListener('dragover', (e) => { e.preventDefault(); });
 stage.addEventListener('drop', (e) => {
   e.preventDefault();
@@ -1037,77 +725,130 @@ stage.addEventListener('drop', (e) => {
   if (f) openFile(f);
 });
 
-// ---------------------------------------------------------------- export dialog
-const dlg = $('#export-dialog');
-$('#btn-export').addEventListener('click', () => {
-  const v = videoSupport();
-  $('#do-video').disabled = !v;
-  $('#video-note').textContent = v
-    ? `Records one seamless ${doc.loop}s loop in real time (${v.includes('mp4') ? 'MP4' : 'WebM'}).`
-    : 'Video recording is not supported in this browser.';
-  dlg.showModal();
-});
-$('#png-scale').addEventListener('click', (e) => {
-  const b = e.target.closest('button');
-  if (!b) return;
-  state.pngScale = Number(b.dataset.v);
-  $('#png-scale').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
-});
+// ---------------------------------------------------------------- editor API (used by the Lit UI)
+function forSel(fn) { for (const b of selectedBlobs()) fn(b); }
+/** Apply a live edit: redraw and refresh the panel, without an undo step. */
+function edited() { requestRender(); notify(); }
 
-function setExportBusy(busy, label = '') {
-  const prog = $('#export-progress');
-  prog.hidden = !busy;
-  dlg.querySelectorAll('.export-item button').forEach((b) => { b.disabled = busy || (b.id === 'do-video' && !videoSupport()); });
-  if (busy) setProgress(0, label);
-}
-function setProgress(p, label) {
-  const prog = $('#export-progress');
-  prog.querySelector('div').style.setProperty('--p', `${Math.round(p * 100)}%`);
-  prog.querySelector('span').textContent = label || `${Math.round(p * 100)}%`;
-}
+const editor = {
+  get doc() { return doc; },
+  state,
+  selected: selectedBlobs,
+  commit,
+  canUndo: () => history.index > 0,
+  canRedo: () => history.index < history.stack.length - 1,
+  undo,
+  redo,
 
-$('#do-png').addEventListener('click', async () => {
-  setExportBusy(true, 'Rendering…');
-  try {
-    const blob = await exportPNG(doc, state.time, state.pngScale);
-    download(blob, `blobs-${stamp()}.png`);
-    toast('PNG exported.');
-  } catch (err) {
-    console.error(err);
-    toast('PNG export failed: ' + err.message, { error: true });
-  } finally { setExportBusy(false); }
-});
-$('#do-svg').addEventListener('click', async () => {
-  setExportBusy(true);
-  try {
-    const svg = await exportSVG(doc, state.time, { onProgress: (p) => setProgress(p) });
-    download(new Blob([svg], { type: 'image/svg+xml' }), `blobs-${stamp()}.svg`);
-    toast('SVG exported.');
-  } catch (err) {
-    console.error(err);
-    toast('SVG export failed: ' + err.message, { error: true });
-  } finally { setExportBusy(false); }
-});
-$('#do-video').addEventListener('click', async () => {
-  const ac = new AbortController();
-  state.exporting = ac;
-  setExportBusy(true, 'Recording…');
-  try {
-    const { blob, ext } = await recordVideo(doc, {
-      signal: ac.signal,
-      onProgress: (p) => setProgress(p, `${(p * doc.loop).toFixed(1)}s / ${doc.loop}s`),
+  togglePlay() {
+    setPlaying(!state.playing);
+    if (state.playing && !isAnimated(doc)) toast('Nothing moves yet. Pick a motion for a blob in the panel.');
+  },
+  scrub(frac) {
+    state.playing = false;
+    state.time = frac * doc.loop * 0.99999;
+    requestRender();
+    notify();
+  },
+  addBlob: addBlobAtCenter,
+  zoomBy(f) { const s = stageSize(); zoomAt(s.w / 2, s.h / 2, f); },
+  fitView,
+  loadPreset(i) {
+    const p = PRESETS[i];
+    if (p) loadDoc(normalizeDoc(p.build()));
+  },
+
+  // Bridges
+  setParam(key, v) { doc.params[key] = v; edited(); },
+  resetParams() {
+    doc.params = { ...DEFAULT_PARAMS, noOverlap: doc.params.noOverlap };
+    commit(); edited();
+  },
+  setNoOverlap(on) { doc.params.noOverlap = !!on; commit(); edited(); },
+
+  // Selection
+  setRadius(v) { forSel((b) => { b.r = v; }); state.lastRadius = v; edited(); },
+  setMotion(key, v) { forSel((b) => { b.motion[key] = key === 'cycles' ? Math.round(v) : v; }); edited(); },
+  setMotionType(id) {
+    forSel((bl) => {
+      bl.motion.type = id;
+      if (id === 'orbit' && Math.abs(bl.motion.angle) > 1) bl.motion.angle = 1;
+      if (id === 'swing' && Math.abs(bl.motion.angle) <= 1) bl.motion.angle = 0;
     });
-    download(blob, `blobs-${stamp()}.${ext}`);
-    toast('Video exported.');
-  } catch (err) {
-    if (err.name !== 'AbortError') { console.error(err); toast('Recording failed: ' + (err.message || err), { error: true }); }
-  } finally {
-    state.exporting = null;
-    setExportBusy(false);
-  }
-});
-$('#cancel-export').addEventListener('click', () => state.exporting?.abort());
-dlg.addEventListener('close', () => state.exporting?.abort());
+    commit(); edited();
+    if (id !== 'none' && !state.playing) setPlaying(true);
+  },
+  setDirection(dir) { forSel((bl) => { bl.motion.angle = dir; }); commit(); edited(); },
+  setBlobColor(c) { forSel((b) => { b.color = c; }); state.lastColor = c; edited(); },
+  duplicate() { if (duplicateSelection().length) { commit(); edited(); } },
+  toFront: bringToFront,
+  remove: deleteSelection,
+
+  // Canvas
+  setBoardPreset(id) {
+    const p = BOARD_PRESETS.find((x) => x.id === id);
+    if (p) setBoardSize(p.w, p.h); else notify();
+  },
+  setBoardSize: (w, h) => setBoardSize(w, h),
+  setBackground(c) { doc.background = c; edited(); },
+  setTransparent(on) { doc.transparent = !!on; commit(); edited(); },
+  setLoop(v) { doc.loop = v; state.time = state.time % v; edited(); },
+
+  // File
+  newDoc() {
+    const d = emptyDoc();
+    d.board = { ...doc.board };
+    d.background = doc.background;
+    loadDoc(d);
+  },
+  openFile,
+  saveJSON,
+  async copyLink() {
+    try {
+      const code = await encodeDoc(doc);
+      const url = `${location.origin}${location.pathname}#d=${code}`;
+      await navigator.clipboard.writeText(url);
+      toast('Link copied. Anyone with it opens this composition.');
+    } catch (err) {
+      console.error(err);
+      toast('Could not copy the link in this browser.', { error: true });
+    }
+  },
+
+  // Export
+  openExport() { exportDialog.show(); },
+  videoSupport,
+  async exportPNG(scale) {
+    try {
+      const blob = await exportPNG(doc, state.time, scale);
+      download(blob, `blobs-${stamp()}.png`);
+      toast('PNG exported.');
+    } catch (err) {
+      console.error(err);
+      toast('PNG export failed: ' + err.message, { error: true });
+    }
+  },
+  async exportSVG(onProgress) {
+    try {
+      const svg = await exportSVG(doc, state.time, { onProgress });
+      download(new Blob([svg], { type: 'image/svg+xml' }), `blobs-${stamp()}.svg`);
+      toast('SVG exported.');
+    } catch (err) {
+      console.error(err);
+      toast('SVG export failed: ' + err.message, { error: true });
+    }
+  },
+  async recordVideo(signal, onProgress) {
+    try {
+      const { blob, ext } = await recordVideo(doc, { signal, onProgress });
+      download(blob, `blobs-${stamp()}.${ext}`);
+      toast('Video exported.');
+    } catch (err) {
+      if (err.name !== 'AbortError') { console.error(err); toast('Recording failed: ' + (err.message || err), { error: true }); }
+    }
+  },
+};
+store.editor = editor;
 
 // ---------------------------------------------------------------- boot
 async function boot() {
@@ -1145,4 +886,10 @@ window.blobs = {
   load: (d) => loadDoc(normalizeDoc(d)),
   setTime: (t) => { state.time = t; requestRender(); },
   play: setPlaying,
+  /**
+   * Last frame: sceneMs = bridges on the CPU, renderMs = GPU submission
+   * (including tileMs, building the tile lists). drawn=false means the frame
+   * was identical to the previous one and the canvas was left as it was.
+   */
+  stats: () => ({ ...perf, ...(renderer ? renderer.stats : {}), pairs: state.frame.pairs.length }),
 };

@@ -2,12 +2,12 @@
 
 A browser tool for composing **static and animated blob compositions** in which circles grow smooth, organic bridges toward each other when they get close: thick goo when they touch, long thin threads as they move apart, then a clean pinch-off and retraction.
 
-Plain HTML/CSS/JS with no build step and no dependencies. It runs on any static host, GitHub Pages included.
+Plain HTML/CSS/JS with no build step. The interface is built with [Lit](https://lit.dev) web components; Lit is vendored as one file in `src/vendor/`, so there is nothing to install. It runs on any static host, GitHub Pages included.
 
 ## Features
 
 - **Organic bridges.** Every pair of blobs within reach is joined by a tapered, slightly bent neck, and a cubic smooth-min fillets it into both blobs. Bridge width, the pinch, and the retraction are all continuous functions of distance and size, so bridges never flicker, pop, or break suddenly. The test suite checks this.
-- **GPU rendering.** A WebGL2 signed-distance-field shader handles up to 128 blobs and 512 bridges, with anti-aliasing taken from the field's real screen-space gradient.
+- **GPU rendering.** A WebGL2 signed-distance-field shader handles up to 128 blobs and 512 bridges, with anti-aliasing taken from the field's real screen-space gradient. The screen is split into tiles and each tile only visits the blobs and bridges that can affect it, so large compositions stay fast.
 - **Dynamic compositions.** Each blob can drift, orbit, swing, and pulse. All motion repeats exactly over the loop length, so recorded videos loop seamlessly.
 - **Colour blending.** Blobs of different colours blend cleanly through their bridges. The palette includes `#c5d92f` and `#dddddd`.
 - **Bridge controls.** Sliders set reach, snap point, thickness, flare, taper, smoothness, and organic variation.
@@ -24,7 +24,7 @@ Plain HTML/CSS/JS with no build step and no dependencies. It runs on any static 
 
 | Action | How |
 | --- | --- |
-| Add a blob | Double-click the canvas, press `A`, or click **+ Blob** |
+| Add a blob | Double-click the canvas, press `A`, or click **Add blob** |
 | Move | Drag a blob (hold `Shift` to lock the axis, `Alt` to duplicate while dragging) |
 | Resize | Drag the knob on the selection ring, or press `[` / `]` |
 | Select several | `Shift`-click, drag a box, or press `Ctrl+A` |
@@ -62,6 +62,7 @@ The tests check that the field stays continuous while blobs merge, stretch, pinc
 3. Each bridge is a bent capsule whose radius follows `wMid + (wEnd − wMid)·|u|^taper` along its length. A per-pair seeded hash sets its bend and neck offset, which keeps them stable over time and independent of blob order.
 4. With **No overlap** on, each bridge is sampled along its length with its real width. A bridge that comes close to another bridge or a third blob gets a smooth suppression amount, and the weaker of two bridges yields. Suppression first thins a bridge, then pinches and retracts it, so a composition that settles mid-way shows a thin bridge rather than a sudden gap.
 5. Circles and bridges are merged with a cubic smooth-min. Colours blend over a narrower band than the shape, which keeps colour junctions clean.
+6. For speed, the renderer builds a list of items per screen tile. An item is left out of a tile only when the shader would skip it at every pixel of that tile anyway, so tiled and untiled output are identical. `window.blobs.stats()` in the browser console reports the last frame's timings.
 
 ## Browser support
 

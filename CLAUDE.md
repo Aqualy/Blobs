@@ -1,6 +1,6 @@
 # Blobs: project context
 
-A browser tool for composing static and animated blob compositions. Circles grow smooth organic bridges when they get close, modelled on the user's reference image of three black circles joined by thin, concave-filleted necks. The tool is plain HTML/CSS/ES modules with **no build step and no dependencies**.
+A browser tool for composing static and animated blob compositions. Circles grow smooth organic bridges when they get close, modelled on the user's reference image of three black circles joined by thin, concave-filleted necks. The tool is plain HTML/CSS/ES modules with **no build step and no installed dependencies**. The UI uses Lit web components; Lit is vendored as a single file (`src/vendor/lit-core.min.js`, lit-core 3.2.1) and imported only through `src/ui/lit.js`.
 
 - Repo: https://github.com/Aqualy/Blobs (branch `main`)
 - Live: https://blobs-llz4.onrender.com, a Render static site
@@ -22,12 +22,13 @@ npm test    # node --test "test/*.test.mjs"
 | File | Role |
 | --- | --- |
 | `src/field.js` | **Single source of truth for the shape.** `computePairs()` builds bridges; `evalField`/`evalFieldWeights` evaluate the SDF on the CPU. Also holds `DEFAULT_PARAMS`, `PARAM_RANGES`, `LIMITS` (128 blobs / 512 pairs), and no-overlap suppression. |
-| `src/renderer.js` | WebGL2 fragment shader that **mirrors `bridgeDist` + smooth-min from field.js**. Pair data goes in through an RGBA32F texture (4 texels per row). Any change to the bridge SDF or colour blending must be made in **both** places. |
+| `src/renderer.js` | WebGL2 fragment shader that **mirrors `bridgeDist` + smooth-min from field.js**. Pair data goes in through an RGBA32F texture (4 texels per row). Any change to the bridge SDF or colour blending must be made in **both** places. Tile culling: `_buildTiles` gives each screen tile its own item list (RG32UI header + R16UI list textures). `skipUnchanged` (editor only) leaves the canvas alone when a frame is identical to the last. |
 | `src/model.js` | Document schema, `normalizeDoc` (sanitizes all loaded/URL/localStorage input), motion (`resolveBlob`: drift/orbit/swing/pulse, all periodic in `doc.loop` for seamless video), presets (Triad = reference image, Lime orbit, Chain, Cluster, Pulse ring, Blank). |
 | `src/scene.js` | `frameAt(doc, time)`: resolves blobs and pairs for a moment in time. |
 | `src/contour.js` | Marching squares, RDP simplification, Catmull–Rom to SVG path. |
 | `src/export.js` | PNG (offscreen renderer), SVG (CPU field; multi-colour becomes crisp regions), video (MediaRecorder, one loop, real time), download helper. |
-| `src/app.js` | Editor UI: pointer/touch/pinch, marquee, resize knob, undo/redo (JSON snapshots), autosave (`localStorage` `blobs:doc:v1`), share links (`#d=` deflate-raw base64url), panel widgets. `window.blobs` is a debug/automation handle. |
+| `src/app.js` | Editor core: pointer/touch/pinch, marquee, resize knob, keyboard, undo/redo (JSON snapshots), autosave (`localStorage` `blobs:doc:v1`), share links (`#d=` deflate-raw base64url). Exposes the `editor` API on `store.editor` and calls `notify()` after changes. `window.blobs` is a debug/automation handle; `window.blobs.stats()` gives last-frame timings. |
+| `src/ui/` | Lit components. `store.js` (editor handle, `notify('change'|'time')`, `StoreController`), `theme.js` (shared control styles; tokens live on `:root` in `styles.css`), `icons.js`, `controls.js` (`bl-slider`, `bl-swatches`, `bl-segmented`, `bl-switch`), `panel.js`, `topbar.js` (+ `bl-zoombar`), `dialogs.js` (`bl-export-dialog`, `bl-toasts`). Controls emit `bl-input` (live preview) and `bl-change` (record an undo step); never use native `input`, which is composed and leaks out of shadow roots. |
 
 ## How the bridges work (invariants: don't break)
 
@@ -36,6 +37,12 @@ npm test    # node --test "test/*.test.mjs"
 - Bend and neck offset come from `hash3(idA, idB)` with pairs ordered by id: stable over time and independent of list order.
 - Colours blend over `COLOR_BAND = 0.3 × k`, and the colour along a bridge switches near the neck. This avoids muddy junctions.
 - **The user's top requirement is smoothness: no flicker, pops, or sudden breaks.** Every quantity must be a continuous function of blob positions and sizes. Tests enforce this by sampling the field (clamped to the visible ±4 band) while blobs move in 0.25–0.5 unit steps.
+
+## Performance invariants (output must stay identical)
+
+- **Tile culling is exact.** A blob is dropped from a tile only if its nearest distance over the tile exceeds the farthest distance of an *earlier* blob plus its k (the running field is never above any earlier item's distance). A bridge is dropped only if its bounding-circle distance exceeds the farthest distance of any blob plus its k. Order is preserved, blob 0 is always kept (the shader's `first` logic), and tiles wholly outside the clipped artboard get no items. Tile size is even, so 2×2 derivative quads never straddle tiles. If lists exceed the texture, rendering falls back to untiled.
+- **No overlap pruning is exact.** `bridgeClearance` skips segment pairs whose lower bound (centre distance − half-lengths − widths + per-segment root-allowance lower bound) cannot beat the current best; the pair loop skips pairs whose bounding-circle lower bound is past the end of the overlap ramp.
+- Verified by rendering 81 scenes (presets, random up to 128 blobs, No overlap on/off, three zooms) against the previous commit: byte-identical pixels; and 3,315 animated frames of `frameAt` compared bit-for-bit.
 
 ## No overlap switch (`params.noOverlap`, boolean, default off)
 
@@ -58,4 +65,6 @@ Intended behaviour, per the user: turning it on should remove **only bridges tha
 - MediaRecorder's `start` event can arrive late: the timeline must begin on `onstart`, or the video is empty. Empty output is reported as an error.
 - The board auto-fits on resize until the user zooms or pans (`state.autoFit`).
 - The user's locale shows decimal commas in number inputs; this is expected.
+- Keyboard shortcuts must look through shadow roots for the focused element (`deepActive()` in app.js), or typing in a panel field triggers shortcuts.
+- The recording/export renderer must not use `skipUnchanged`: `captureStream` needs every frame drawn.
 - Commit as the `gh` user with a noreply email, and end commit messages with the Co-Authored-By line.

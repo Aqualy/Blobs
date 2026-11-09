@@ -5,169 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Blobs</title>
   <meta name="description" content="Compose static and animated blob shapes that grow smooth organic bridges when they get close. Export PNG, SVG and video.">
-  <meta name="theme-color" content="#141414">
+  <meta name="theme-color" content="#18181a">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="modulepreload" href="src/vendor/lit-core.min.js">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand" aria-label="Blobs">
-      <img src="favicon.svg" width="22" height="22" alt="">
-      <span>Blobs</span>
-    </div>
-
-    <label class="field compact">
-      <span class="sr-only">Preset</span>
-      <select id="preset" title="Load a preset composition">
-        <option value="" disabled selected>Presets…</option>
-      </select>
-    </label>
-
-    <div class="group">
-      <button class="icon" id="undo" title="Undo (Ctrl+Z)" aria-label="Undo">
-        <svg viewBox="0 0 24 24"><path d="M9 7 4 12l5 5M4 12h11a5 5 0 0 1 0 10h-2"/></svg>
-      </button>
-      <button class="icon" id="redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
-        <svg viewBox="0 0 24 24"><path d="m15 7 5 5-5 5M20 12H9a5 5 0 0 0 0 10h2"/></svg>
-      </button>
-    </div>
-
-    <div class="group transport">
-      <button class="icon accent" id="play" title="Play / pause (Space)" aria-label="Play">
-        <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" class="fill"/></svg>
-        <svg class="i-pause" viewBox="0 0 24 24"><path d="M7 5h3v14H7zM14 5h3v14h-3z" class="fill"/></svg>
-      </button>
-      <input type="range" id="scrub" min="0" max="1000" step="1" value="0" aria-label="Timeline">
-      <output id="clock">0.00s</output>
-    </div>
-
-    <div class="spacer"></div>
-
-    <div class="group">
-      <button id="btn-add" title="Add blob (A, or double-click the canvas)">+ Blob</button>
-      <button id="btn-export" class="primary" title="Export">Export</button>
-    </div>
-  </header>
+  <bl-topbar></bl-topbar>
 
   <main class="workspace">
     <section class="stage" id="stage" aria-label="Canvas">
       <canvas id="gl"></canvas>
       <canvas id="overlay"></canvas>
-      <div class="zoombar">
-        <button class="icon small" id="zoom-out" aria-label="Zoom out" title="Zoom out (−)"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
-        <button id="zoom-label" class="small mono" title="Fit to screen (F)">100%</button>
-        <button class="icon small" id="zoom-in" aria-label="Zoom in" title="Zoom in (+)"><svg viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></svg></button>
-      </div>
+      <bl-zoombar></bl-zoombar>
       <div class="hint" id="hint">Double-click to add · drag to move · drag the knob to resize · Space-drag to pan</div>
       <div class="fatal" id="fatal" hidden></div>
     </section>
 
-    <aside class="panel" id="panel">
-      <section class="card" id="sec-selection">
-        <header><h2>Blob</h2><span class="muted" id="sel-count">Nothing selected</span></header>
-        <div class="empty" id="sel-empty">Select a blob to edit it. Shift-click or drag a box to select several.</div>
-        <div id="sel-body" hidden>
-          <div class="row" data-blob="r"></div>
-          <div class="row colors">
-            <span class="lbl">Color</span>
-            <div class="swatches" id="blob-swatches"></div>
-          </div>
-          <div class="row">
-            <span class="lbl">Motion</span>
-            <div class="seg" id="motion-type" role="radiogroup" aria-label="Motion"></div>
-          </div>
-          <div id="motion-body">
-            <div class="row" data-motion="amp"></div>
-            <div class="row" data-motion="cycles"></div>
-            <div class="row" data-motion="phase"></div>
-            <div class="row" data-motion="angle"></div>
-          </div>
-          <div class="row" data-motion="pulse"></div>
-          <div class="actions">
-            <button id="btn-dup" title="Duplicate (Ctrl+D)">Duplicate</button>
-            <button id="btn-front" title="Bring to front">To front</button>
-            <button id="btn-del" class="danger" title="Delete (Del)">Delete</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="card">
-        <header><h2>Bridges</h2><button class="link" id="params-reset">Reset</button></header>
-        <div class="row" data-param="reach"></div>
-        <div class="row" data-param="snap"></div>
-        <div class="row" data-param="thickness"></div>
-        <div class="row" data-param="flare"></div>
-        <div class="row" data-param="taper"></div>
-        <div class="row" data-param="smooth"></div>
-        <div class="row" data-param="organic"></div>
-        <label class="row switch" title="When on, bridges never cross or merge into each other: a weaker bridge pinches off and retracts instead">
-          <span class="lbl">No overlap</span>
-          <span class="switch-desc">Bridges never cross or touch</span>
-          <input type="checkbox" id="no-overlap" role="switch">
-        </label>
-      </section>
-
-      <section class="card">
-        <header><h2>Canvas</h2></header>
-        <div class="row">
-          <span class="lbl">Size</span>
-          <select id="board-preset"></select>
-        </div>
-        <div class="row two">
-          <label class="mini"><span>W</span><input type="number" id="board-w" min="64" max="8192" step="1"></label>
-          <label class="mini"><span>H</span><input type="number" id="board-h" min="64" max="8192" step="1"></label>
-        </div>
-        <div class="row colors">
-          <span class="lbl">Background</span>
-          <div class="swatches" id="bg-swatches"></div>
-        </div>
-        <label class="row check"><input type="checkbox" id="transparent"> <span>Transparent background</span></label>
-        <div class="row" data-doc="loop"></div>
-      </section>
-
-      <section class="card">
-        <header><h2>File</h2></header>
-        <div class="actions wrap">
-          <button id="btn-new">New</button>
-          <button id="btn-open">Open…</button>
-          <button id="btn-save">Save .json</button>
-          <button id="btn-link">Copy link</button>
-        </div>
-        <input type="file" id="file-input" accept=".json,application/json" hidden>
-      </section>
-    </aside>
+    <bl-panel aria-label="Properties"></bl-panel>
   </main>
 
-  <dialog id="export-dialog">
-    <form method="dialog" class="dialog">
-      <header><h2>Export</h2><button class="icon small" value="cancel" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></header>
-      <div class="export-grid">
-        <div class="export-item">
-          <h3>PNG</h3>
-          <p class="muted">Pixel image of the current frame.</p>
-          <div class="seg" id="png-scale">
-            <button type="button" data-v="1" class="on">1×</button>
-            <button type="button" data-v="2">2×</button>
-            <button type="button" data-v="4">4×</button>
-          </div>
-          <button type="button" class="primary" id="do-png">Download PNG</button>
-        </div>
-        <div class="export-item">
-          <h3>SVG</h3>
-          <p class="muted">Vector outline of the current frame. Where colours blend, the SVG uses crisp colour regions.</p>
-          <button type="button" class="primary" id="do-svg">Download SVG</button>
-        </div>
-        <div class="export-item">
-          <h3>Video</h3>
-          <p class="muted" id="video-note">Records one seamless loop in real time.</p>
-          <button type="button" class="primary" id="do-video">Record video</button>
-        </div>
-      </div>
-      <div class="progress" id="export-progress" hidden><div></div><span></span><button type="button" id="cancel-export" class="link">Cancel</button></div>
-    </form>
-  </dialog>
-
-  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <bl-export-dialog></bl-export-dialog>
+  <bl-toasts></bl-toasts>
 
   <script type="module" src="src/app.js"></script>
 </body>
