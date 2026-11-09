@@ -18,6 +18,7 @@ export const DEFAULT_PARAMS = Object.freeze({
   snap: 0.86,      // fraction of reach at which the neck pinches off
   taper: 3.0,      // profile exponent: higher = thin for longer, sharper flare
   organic: 0.55,   // per-bridge bend and neck asymmetry
+  maxBridges: 12,  // most bridges one blob keeps at once; MAX_BRIDGES_OFF = no limit
   noOverlap: false, // bridges give way instead of crossing or merging into each other
 });
 
@@ -29,7 +30,11 @@ export const PARAM_RANGES = Object.freeze({
   snap: [0.3, 0.95, 0.01],
   taper: [1.2, 6, 0.05],
   organic: [0, 1, 0.01],
+  maxBridges: [1, 12, 1],
 });
+
+/** Top of the maxBridges range: the cap is off. */
+export const MAX_BRIDGES_OFF = 12;
 
 export const LIMITS = Object.freeze({ maxBlobs: 128, maxPairs: 512 });
 
@@ -82,12 +87,15 @@ export function computePairs(blobs, p) {
         A, B, ia: swap ? j : i, ib: swap ? i : j, d, gap,
         ux: dx / d, uy: dy / d,
         t: Math.max(gap, 0) / reachDist,
+        g: gap / reachDist,
         sup: 0,
       });
     }
   }
 
   if (p.noOverlap && cands.length) suppressOverlaps(cands, blobs, n, p);
+  const cap = Math.round(p.maxBridges ?? MAX_BRIDGES_OFF);
+  if (cap < MAX_BRIDGES_OFF && cands.length) limitBridges(cands, n, cap);
 
   const pairs = [];
   for (const c of cands) {
@@ -97,6 +105,52 @@ export function computePairs(blobs, p) {
     if (pairs.length >= LIMITS.maxPairs) break;
   }
   return pairs;
+}
+
+/**
+ * Per-blob bridge cap. Each blob ranks its bridges by strength (shorter
+ * relative gap = stronger) and lets go of those past its cap. The cut is
+ * soft: a bridge's suppression is a smoothstep of how far it falls below the
+ * cap-th strongest *other* bridge at that blob (an order statistic, so it is
+ * continuous), and a pair yields if either end rejects it. When two bridges
+ * swap rank they cross-fade instead of popping. A tiny per-pair bias from
+ * hash3 settles exact ties (symmetric layouts) consistently.
+ * Bridges already given up (by No overlap or by their other end) take a
+ * slot less, so a blob can pick up its next strongest bridge instead.
+ */
+function limitBridges(cands, n, cap) {
+  const W = 0.12; // half-width of the cross-fade, in units of reach
+  const m = cands.length;
+  const s = new Float64Array(m);
+  const at = Array.from({ length: n }, () => []);
+  for (let c = 0; c < m; c++) {
+    const C = cands[c];
+    s[c] = -C.g + hash3(C.A.id, C.B.id, 7) * W * 0.5;
+    at[C.ia].push(c * 2);
+    at[C.ib].push(c * 2 + 1);
+  }
+  let end = new Float64Array(m * 2); // suppression asked by each end
+  const eff = new Float64Array(m * 2);
+  // Freeing a slot moves a bridge by one cross-fade width at most; anything
+  // stronger would make the feedback between ends steep enough to pop.
+  for (let pass = 0; pass < 2; pass++) {
+    for (let e = 0; e < m * 2; e++) {
+      const c = e >> 1;
+      eff[e] = s[c] - 2 * W * Math.max(cands[c].sup, end[e ^ 1]);
+    }
+    const next = new Float64Array(m * 2);
+    for (const list of at) {
+      if (list.length <= cap) continue;
+      const vals = list.map((e) => eff[e]).sort((a, b) => b - a);
+      for (const e of list) {
+        // cap-th strongest among the others at this blob.
+        const kth = eff[e] >= vals[cap - 1] ? vals[cap] : vals[cap - 1];
+        next[e] = smoothstep(-W, W, kth - eff[e]);
+      }
+    }
+    end = next;
+  }
+  for (let c = 0; c < m; c++) cands[c].sup = Math.max(cands[c].sup, end[c * 2], end[c * 2 + 1]);
 }
 
 /**

@@ -195,3 +195,50 @@ test('no-overlap: removes only the crossing bridges, keeps every other bridge in
   }
   assert.ok(checked > 0, 'scenario never produced a visible crossing');
 });
+
+test('max bridges: no blob keeps more than its cap', () => {
+  const hub = { id: 1, x: 400, y: 400, r: 60 };
+  const ring = [140, 160, 180, 200, 220].map((d, i) => {
+    const a = (i / 5) * Math.PI * 2;
+    return { id: i + 2, x: 400 + Math.cos(a) * d, y: 400 + Math.sin(a) * d, r: 30 };
+  });
+  const blobs = [hub, ...ring];
+  const p = { ...P, reach: 6 };
+  const degrees = (q) => {
+    const deg = new Array(blobs.length).fill(0);
+    for (const b of computePairs(blobs, q)) if (b.wMid > 1) { deg[b.ia]++; deg[b.ib]++; }
+    return deg;
+  };
+  assert.equal(degrees(p)[0], 5);
+  for (const cap of [1, 2, 3]) {
+    const deg = degrees({ ...p, maxBridges: cap });
+    assert.ok(deg.every((d) => d <= cap), `cap ${cap}: ${deg}`);
+    assert.ok(deg[0] >= 1, `cap ${cap}: hub lost every bridge`);
+  }
+});
+
+test('max bridges: shape stays continuous while neighbours swap rank', () => {
+  for (const noOverlap of [false, true]) {
+    const p = { ...P, maxBridges: 1, noOverlap };
+    let prev = null;
+    let worst = 0;
+    for (let x = 180; x <= 420; x += 0.5) {
+      const blobs = [{ id: 1, x, y: 200, r: 45 }, { id: 2, x: 120, y: 200, r: 50 }, { id: 3, x: 480, y: 200, r: 50 },
+        { id: 4, x: 300, y: 330, r: 35 }];
+      const s = visible(sampleGrid(blobs, 0, 0, 600, 400, 6, p));
+      if (prev) for (let i = 0; i < s.length; i++) worst = Math.max(worst, Math.abs(s[i] - prev[i]));
+      prev = s;
+    }
+    assert.ok(worst < 2, `max field jump per step was ${worst.toFixed(3)} (noOverlap ${noOverlap})`);
+  }
+});
+
+test('max bridges at the top of the range changes nothing', () => {
+  for (const pr of PRESETS) {
+    const doc = normalizeDoc(pr.build());
+    const blobs = doc.blobs.map((b) => resolveBlob(b, 0, doc.loop, {}));
+    const a = computePairs(blobs, { ...doc.params });
+    const b = computePairs(blobs, { ...doc.params, maxBridges: undefined });
+    assert.deepEqual(a, b);
+  }
+});

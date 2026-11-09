@@ -54,6 +54,12 @@ Intended behaviour, per the user: turning it on should remove **only bridges tha
 - A real crossing (clearance ≈ −(both half-widths), measured as `cross`) removes **both** bridges unless one is clearly stronger. Brushing side by side moves only the weaker one, where strength = 1 − t. A bridge through a third blob yields unless that blob is merged with one of its ends.
 - The regression test "removes only the crossing bridges…" encodes the user's composition across 45 parameter combinations.
 
+## Max bridges (`params.maxBridges`, 1–12, default 12 = off)
+
+- `limitBridges()` runs after `suppressOverlaps`. Each blob ranks its candidates by strength −gap/reach (plus a tiny `hash3` bias that breaks exact ties). A candidate's suppression is `smoothstep(−W, W, kth − own)`, where `kth` is the cap-th strongest *other* candidate at that blob and W = 0.12. A pair takes the max over its two ends, then goes through `suppressedT` like No overlap.
+- One feedback pass lets bridges rejected elsewhere free their slot. The feedback is capped at 2·W because stronger feedback made the transition steep enough to pop (an 8-unit jump in the test).
+- Near ties, both bridges are partly suppressed. This is the price of continuity.
+
 ## Verification workflow used
 
 - Visual prototyping: render the CPU field to PNG with a tiny Node PNG writer (zlib) and look at it. Fast for tuning shapes.

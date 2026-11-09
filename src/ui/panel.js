@@ -15,6 +15,7 @@ const PARAMS = [
   ['taper', 'Taper', 'Higher keeps the neck thin for longer, with a sharper flare'],
   ['smooth', 'Smoothness', 'Size of the fillets where bridges meet blobs'],
   ['organic', 'Organic', 'Per-bridge bend and asymmetry'],
+  ['maxBridges', 'Max bridges', 'Most bridges one blob keeps at once; the weakest let go. 12 = no limit'],
 ];
 
 const MOTION_FIELDS = {
