@@ -1,0 +1,11 @@
+{
+  "name": "blobs",
+  "version": "1.0.0",
+  "description": "Browser tool for composing static and animated blobs connected by smooth organic bridges.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "npx --yes serve@14.2.4 -l 5173 .",
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
