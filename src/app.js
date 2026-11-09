@@ -797,7 +797,7 @@ const PARAM_TIPS = {
   smooth: 'Size of the fillets where bridges meet blobs',
   organic: 'Per-bridge bend and asymmetry',
 };
-const paramWidgets = Object.keys(DEFAULT_PARAMS).map((key) => {
+const paramWidgets = Object.keys(PARAM_RANGES).map((key) => {
   const [min, max, step] = PARAM_RANGES[key];
   const row = $(`[data-param="${key}"]`);
   row.title = PARAM_TIPS[key];
@@ -807,8 +807,12 @@ const paramWidgets = Object.keys(DEFAULT_PARAMS).map((key) => {
     set: (v) => { doc.params[key] = v; },
   });
 });
+$('#no-overlap').addEventListener('change', (e) => {
+  doc.params.noOverlap = e.target.checked;
+  commit(); requestRender();
+});
 $('#params-reset').addEventListener('click', () => {
-  doc.params = { ...DEFAULT_PARAMS };
+  doc.params = { ...DEFAULT_PARAMS, noOverlap: doc.params.noOverlap };
   commit(); syncPanel(); requestRender();
 });
 
@@ -934,6 +938,7 @@ function syncPanel() {
     blobColor.update();
   }
   paramWidgets.forEach((w) => w.update());
+  $('#no-overlap').checked = !!doc.params.noOverlap;
   loopWidget.update();
   bgColor.update();
   $('#transparent').checked = doc.transparent;

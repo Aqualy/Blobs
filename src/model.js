@@ -55,10 +55,11 @@ export function normalizeDoc(raw) {
   doc.transparent = !!raw.transparent;
   doc.loop = clamp(num(raw.loop, 8), 1, 60);
   if (raw.params && typeof raw.params === 'object') {
-    for (const k of Object.keys(DEFAULT_PARAMS)) {
+    for (const k of Object.keys(PARAM_RANGES)) {
       const [lo, hi] = PARAM_RANGES[k];
       doc.params[k] = clamp(num(raw.params[k], DEFAULT_PARAMS[k]), lo, hi);
     }
+    doc.params.noOverlap = raw.params.noOverlap === true;
   }
   const seen = new Set();
   let nextId = 1;

@@ -11,6 +11,7 @@ Plain HTML/CSS/JS with no build step and no dependencies. It runs on any static 
 - **Dynamic compositions.** Each blob can drift, orbit, swing, and pulse. All motion repeats exactly over the loop length, so recorded videos loop seamlessly.
 - **Colour blending.** Blobs of different colours blend cleanly through their bridges. The palette includes `#c5d92f` and `#dddddd`.
 - **Bridge controls.** Sliders set reach, snap point, thickness, flare, taper, smoothness, and organic variation.
+- **No overlap switch.** When it is on, bridges never cross, merge into each other, or run through a third blob. Where two bridges would touch, the weaker one (the relatively longer gap) thins and then pinches off; it never disappears abruptly.
 - **Export options.**
   - PNG at 1×, 2×, or 4×, with an optional transparent background.
   - SVG as true vector outlines (marching squares plus Catmull–Rom curves). Multi-colour compositions become crisp colour regions.
@@ -59,7 +60,8 @@ The tests check that the field stays continuous while blobs merge, stretch, pinc
 1. For every pair of blobs, the gap is normalized by their reach: `t = gap / (reach × avg radius)`.
 2. The neck half-width is `thickness × (1 − t/snap)²`. Approaching the snap point, the profile narrows into a localized pinch. Past it the neck turns negative: the bridge splits and the two halves retract into their blobs, reaching zero just as the pair leaves reach.
 3. Each bridge is a bent capsule whose radius follows `wMid + (wEnd − wMid)·|u|^taper` along its length. A per-pair seeded hash sets its bend and neck offset, which keeps them stable over time and independent of blob order.
-4. Circles and bridges are merged with a cubic smooth-min. Colours blend over a narrower band than the shape, which keeps colour junctions clean.
+4. With **No overlap** on, each bridge is sampled along its length with its real width. A bridge that comes close to another bridge or a third blob gets a smooth suppression amount, and the weaker of two bridges yields. Suppression first thins a bridge, then pinches and retracts it, so a composition that settles mid-way shows a thin bridge rather than a sudden gap.
+5. Circles and bridges are merged with a cubic smooth-min. Colours blend over a narrower band than the shape, which keeps colour junctions clean.
 
 ## Browser support
 

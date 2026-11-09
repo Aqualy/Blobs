@@ -133,3 +133,43 @@ test('SVG export of the Triad preset is one ring (outline + hole)', async () => 
   const subpaths = (svg.match(/M/g) || []).length;
   assert.equal(subpaths, 2);
 });
+
+test('no-overlap: crossing diagonals of a square give way', () => {
+  // Four blobs on a square: edge bridges are stronger than the diagonals.
+  const s = 200;
+  const blobs = [
+    { id: 1, x: 200, y: 200, r: 60 }, { id: 2, x: 200 + s, y: 200, r: 60 },
+    { id: 3, x: 200 + s, y: 200 + s, r: 60 }, { id: 4, x: 200, y: 200 + s, r: 60 },
+  ];
+  const cx = 200 + s / 2, cy = 200 + s / 2;
+  const on = { ...P, noOverlap: true };
+  assert.ok(evalField(cx, cy, blobs, computePairs(blobs, P), P) < 0, 'diagonals cross when allowed');
+  assert.ok(evalField(cx, cy, blobs, computePairs(blobs, on), on) > 2, 'centre stays clear in no-overlap mode');
+  // All four edge bridges survive at full strength.
+  const kept = computePairs(blobs, on).filter((q) => q.wMid > 5);
+  assert.equal(kept.length, 4);
+});
+
+test('no-overlap: a bridge does not run through a third blob', () => {
+  const blobs = [{ id: 1, x: 100, y: 200, r: 50 }, { id: 2, x: 420, y: 200, r: 50 }, { id: 3, x: 260, y: 200, r: 40 }];
+  const on = { ...P, noOverlap: true };
+  const pairs = computePairs(blobs, on);
+  // The direct 1-2 bridge is gone; 1-3 and 3-2 remain.
+  const ids = pairs.map((q) => [blobs[q.ia].id, blobs[q.ib].id].sort().join('-'));
+  assert.ok(!ids.includes('1-2'), ids.join(','));
+  assert.ok(ids.includes('1-3') && ids.includes('2-3'), ids.join(','));
+});
+
+test('no-overlap: shape stays continuous while a blob sweeps through a bridge', () => {
+  const on = { ...P, noOverlap: true };
+  let prev = null;
+  let worst = 0;
+  for (let y = 40; y <= 360; y += 0.5) {
+    const blobs = [{ id: 1, x: 120, y: 200, r: 55 }, { id: 2, x: 480, y: 200, r: 55 }, { id: 3, x: 300, y, r: 35 },
+      { id: 4, x: 300, y: 400 - y * 0.5, r: 30 }];
+    const s = visible(sampleGrid(blobs, 0, 0, 600, 400, 6, on));
+    if (prev) for (let i = 0; i < s.length; i++) worst = Math.max(worst, Math.abs(s[i] - prev[i]));
+    prev = s;
+  }
+  assert.ok(worst < 2.5, `max field jump per step was ${worst.toFixed(3)}`);
+});
