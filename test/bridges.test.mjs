@@ -72,6 +72,25 @@ test('the bounding circle holds the whole curved bridge (exact culling)', () => 
   assert.ok(checked > 100000);
 });
 
+test('a wide, flaring curved bridge is a true distance: no folds or spikes', () => {
+  // The user's composition at Flare 0.44 grew spikes: the curve was an offset
+  // of the straight bridge, which folds once a bridge is wider than its bend.
+  // A true distance never changes faster than the point moves (1-Lipschitz).
+  const p = { ...P, flare: 0.7, taper: 1.2, thickness: 1, smooth: 0.77 };
+  const blobs = [{ id: 1, x: 450, y: 330, r: 135 }, { id: 3, x: 260, y: 860, r: 141 }];
+  for (const [c0, c1] of [[0.85, 0.36], [-1.2, 1.2], [1.2, 1.2], [0.4, -0.9]]) {
+    const [q] = computePairs(blobs, p, edits([{ a: 1, b: 3, c0, c1, flare: 2.5 }]));
+    let worst = 0;
+    const h = 0.5;
+    for (let y = 250; y <= 950; y += 7) for (let x = 0; x <= 700; x += 7) {
+      const d = bridgeDist(x, y, q, null);
+      if (d > 40) continue;
+      worst = Math.max(worst, Math.abs(bridgeDist(x + h, y, q, null) - d) / h, Math.abs(bridgeDist(x, y + h, q, null) - d) / h);
+    }
+    assert.ok(worst <= 1 + 1e-6, `c0=${c0} c1=${c1}: field changes ${worst.toFixed(3)}× faster than distance`);
+  }
+});
+
 test('a shaped bridge stays continuous while its blobs separate', () => {
   const ed = edits([{ a: 1, b: 2, c0: 0.8, c1: -0.6, thick: 2, flare: 1.6, neck: 0.3 }]);
   const reach = P.reach * (60 + 45) / 2;

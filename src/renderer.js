@@ -1,5 +1,5 @@
 // WebGL2 renderer: evaluates the same field as field.js per pixel.
-import { LIMITS, blobK, COLOR_BAND } from './field.js';
+import { LIMITS, blobK, COLOR_BAND, CURVE_SEGS } from './field.js';
 
 // Data texture: one row per blob (rows 0…maxBlobs-1) and per bridge after
 // that, COLS RGBA32F texels per row. Blob rows use texels 0–1; bridge rows
@@ -97,22 +97,59 @@ void main() {
     vec2 r = p - t0.xy;
     float x = dot(r, u);
     float y = -r.x * u.y + r.y * u.x;
-    float tx = clamp(x / L, 0.0, 1.0);
-    y -= t2.x * L * 4.0 * tx * (1.0 - tx);
-    bool handles = t4.x != 0.0 || t4.y != 0.0;
-    if (handles) {
-      // Mirrors handleOffset / handleSlope in field.js.
-      float s = 1.0 - tx;
-      y -= 3.0 * s * tx * (s * t4.x + tx * t4.y) * L;
-      float sl = 3.0 * (s * (s - 2.0 * tx) * t4.x + tx * (2.0 * s - tx) * t4.y);
-      y /= sqrt(1.0 + sl * sl);
-    }
     float m = t1.w;
-    float uu = tx < m ? (m - tx) / m : (tx - m) / (1.0 - m);
-    float wEnd = tx < m ? t1.x : t1.y;
-    float rad = t1.z + (wEnd - t1.z) * pow(uu, t2.z);
-    float bd = length(vec2(x - tx * L, y)) - rad;
-    if (handles) bd = max(bd, length(p - t3.xy) - t3.z); // as in bridgeDist
+    float tx;
+    float bd;
+    if (t4.x != 0.0 || t4.y != 0.0) {
+      // Hand-curved bridge: union of round cones along the Bézier
+      // centre-line, with a vertex at the neck. Mirrors curvedDist in field.js.
+      const int HALF = ${CURVE_SEGS / 2};
+      float best = 1e9;
+      float bt = 0.0;
+      vec2 a = vec2(0.0);
+      float ta = 0.0;
+      float ra = t1.x; // profile at t = 0 is w0
+      for (int s = 1; s <= ${CURVE_SEGS}; s++) {
+        float tb = s <= HALF ? m * float(s) / float(HALF) : m + (1.0 - m) * float(s - HALF) / float(HALF);
+        float sb = 1.0 - tb;
+        vec2 b = vec2(tb * L, (t2.x * 4.0 * tb * (1.0 - tb) + 3.0 * sb * tb * (sb * t4.x + tb * t4.y)) * L);
+        float uu = tb < m ? (m - tb) / m : (tb - m) / (1.0 - m);
+        float rb = t1.z + ((tb < m ? t1.x : t1.y) - t1.z) * pow(uu, t2.z);
+        // Round cone a→b with radii ra, rb (iq's uneven capsule).
+        float sh = max(0.0, -min(ra, rb));
+        float r0 = ra + sh, r1 = rb + sh;
+        vec2 pb = b - a;
+        vec2 pp = vec2(x, y) - a;
+        float hh = dot(pb, pb);
+        float qy = dot(pp, pb) / hh;
+        float qx = abs(pp.x * pb.y - pp.y * pb.x) / hh;
+        float bb = r0 - r1;
+        float dd;
+        if (bb * bb >= hh) {
+          dd = min(length(pp) - r0, length(pp - pb) - r1);
+        } else {
+          float cx = sqrt(hh - bb * bb);
+          float kk = cx * qy - bb * qx;
+          if (kk < 0.0) dd = sqrt(hh * (qx * qx + qy * qy)) - r0;
+          else if (kk > cx) dd = sqrt(hh * (qx * qx + qy * qy + 1.0 - 2.0 * qy)) - r1;
+          else dd = cx * qx + bb * qy - r0;
+        }
+        dd += sh;
+        if (dd < best) { best = dd; bt = ta + (tb - ta) * clamp(qy, 0.0, 1.0); }
+        a = b;
+        ta = tb;
+        ra = rb;
+      }
+      bd = best;
+      tx = bt;
+    } else {
+      tx = clamp(x / L, 0.0, 1.0);
+      y -= t2.x * L * 4.0 * tx * (1.0 - tx);
+      float uu = tx < m ? (m - tx) / m : (tx - m) / (1.0 - m);
+      float wEnd = tx < m ? t1.x : t1.y;
+      float rad = t1.z + (wEnd - t1.z) * pow(uu, t2.z);
+      bd = length(vec2(x - tx * L, y)) - rad;
+    }
     float w;
     d = sminw(d, bd, k, w);
     vec3 ca = fetch(int(t2.w), 1).rgb;

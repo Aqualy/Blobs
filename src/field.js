@@ -239,11 +239,9 @@ function buildPair(c, t, p) {
   const k = Math.max(p.smooth * minR * (0.35 + 0.65 * life), 1e-3) * (1 - pinch * 0.999);
 
   const L = s1 - s0;
-  // Handles: the sideways offset is at most 4/9·(|c0| + |c1|)·L, and the
-  // slope correction in bridgeDist widens the bridge by at most hs.
+  // Handles move the centre-line sideways by at most 4/9·(|c0| + |c1|)·L.
   const ch = Math.abs(c0) + Math.abs(c1);
-  const hs = ch ? Math.sqrt(1 + 9 * ch * ch) : 1;
-  const bound = L * 0.5 + Math.abs(bend) * L + ch * 0.45 * L + Math.max(w0, w1, wMid, 0) * hs + 1;
+  const bound = L * 0.5 + Math.abs(bend) * L + ch * 0.45 * L + Math.max(w0, w1, wMid, 0) + 1;
 
   // Approaching the snap, the profile turns from a long thread into a
   // localized pinch, so a breaking bridge never lingers as a hairline.
@@ -533,10 +531,60 @@ export function handleOffset(c0, c1, tx) {
   return 3 * s * tx * (s * c0 + tx * c1);
 }
 
-/** Slope of handleOffset with respect to tx. */
-function handleSlope(c0, c1, tx) {
-  const s = 1 - tx;
-  return 3 * (s * (s - 2 * tx) * c0 + tx * (2 * s - tx) * c1);
+/** Segments of the polyline a hand-curved bridge is measured against (even). */
+export const CURVE_SEGS = 48;
+
+/**
+ * Distance from (px, py) to a round cone: the hull of a circle of radius ra
+ * at the origin and one of radius rb at (bx, by) (iq's uneven capsule).
+ * Negative radii are handled by growing both by sh and shrinking the result
+ * back (an exact offset of a convex shape). Writes
+ * the projection parameter (0…1) into RC.h.
+ */
+const RC = { h: 0 };
+function roundCone(px, py, bx, by, ra, rb) {
+  const sh = Math.max(0, -Math.min(ra, rb));
+  ra += sh; rb += sh;
+  const h = bx * bx + by * by;
+  const qy = (px * bx + py * by) / h;
+  const qx = Math.abs(px * by - py * bx) / h;
+  RC.h = clamp(qy, 0, 1);
+  const b = ra - rb;
+  // One circle holds the other: the cone is just the larger circle.
+  if (b * b >= h) return Math.min(Math.hypot(px, py) - ra, Math.hypot(px - bx, py - by) - rb) + sh;
+  const cx = Math.sqrt(h - b * b);
+  const k = cx * qy - b * qx;
+  let d;
+  if (k < 0) d = Math.sqrt(h * (qx * qx + qy * qy)) - ra;
+  else if (k > cx) d = Math.sqrt(h * (qx * qx + qy * qy + 1 - 2 * qy)) - rb;
+  else d = cx * qx + b * qy - ra;
+  return d + sh; // the cone was grown by sh to make radii valid: shrink it back
+}
+
+/**
+ * Distance to a hand-curved bridge, in its local frame (x along A→B, y to
+ * the left). The Bézier centre-line is followed as a polyline with a vertex
+ * exactly at the neck, and the bridge is the union of round cones along it,
+ * each spanning the widths at its two ends. Neighbouring cones meet
+ * tangentially, so even a wide, fast-flaring bridge on a tight curve keeps a
+ * smooth edge: no spikes, no scallops. A minimum of continuous pieces is
+ * continuous. MIRRORED in the shader.
+ */
+function curvedDist(x, y, L, br, out) {
+  const half = CURVE_SEGS / 2, m = br.neck;
+  let best = Infinity, bt = 0;
+  let ta = 0, ax = 0, ay = 0, ra = profileAt(br, 0);
+  for (let s = 1; s <= CURVE_SEGS; s++) {
+    const tb = s <= half ? (m * s) / half : m + ((1 - m) * (s - half)) / half;
+    const bx = tb * L;
+    const by = (br.bend * 4 * tb * (1 - tb) + handleOffset(br.c0, br.c1, tb)) * L;
+    const rb = profileAt(br, tb);
+    const dd = roundCone(x - ax, y - ay, bx - ax, by - ay, ra, rb);
+    if (dd < best) { best = dd; bt = ta + (tb - ta) * RC.h; }
+    ta = tb; ax = bx; ay = by; ra = rb;
+  }
+  if (out) out[1] = bt;
+  return best;
 }
 
 /**
@@ -551,15 +599,9 @@ export function bridgeDist(px, py, br, out) {
   const rx = px - br.x0, ry = py - br.y0;
   const x = rx * ux + ry * uy;
   let y = -rx * uy + ry * ux;
+  if (br.c0 || br.c1) return curvedDist(x, y, L, br, out);
   const tx = clamp(x / L, 0, 1);
   y -= br.bend * L * 4 * tx * (1 - tx);
-  if (br.c0 || br.c1) {
-    // Handle curve: offset, then measure across the curve rather than
-    // straight up, so steep stretches keep their thickness.
-    y -= handleOffset(br.c0, br.c1, tx) * L;
-    const sl = handleSlope(br.c0, br.c1, tx);
-    y /= Math.sqrt(1 + sl * sl);
-  }
   const m = br.neck;
   let u, wEnd;
   if (tx < m) { u = (m - tx) / m; wEnd = br.w0; }
@@ -567,9 +609,6 @@ export function bridgeDist(px, py, br, out) {
   const r = br.wMid + (wEnd - br.wMid) * Math.pow(u, br.taper);
   const q = Math.hypot(x - tx * L, y);
   if (out) out[1] = tx;
-  // The slope correction under-estimates distance far from a curved bridge;
-  // the bounding circle keeps the estimate a valid bound there (exact culling).
-  if (br.c0 || br.c1) return Math.max(q - r, Math.hypot(px - br.cx, py - br.cy) - br.bound);
   return q - r;
 }
 
