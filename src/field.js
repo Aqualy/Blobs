@@ -29,7 +29,7 @@ export const PARAM_RANGES = Object.freeze({
   smooth: [0.05, 1.2, 0.01],
   snap: [0.3, 0.95, 0.01],
   taper: [1.2, 6, 0.05],
-  organic: [0, 1, 0.01],
+  organic: [0, 2, 0.01], // above 1: wavy, membrane-like bridges (organicExtras)
   maxBridges: [1, 12, 1],
 });
 
@@ -89,6 +89,18 @@ export const BRIDGE_RANGES = Object.freeze({
 export function computePairs(blobs, p, edits) {
   const cands = [];
   const n = Math.min(blobs.length, LIMITS.maxBlobs);
+  // Organic above 1 bows bridges away from the composition's centre. The
+  // centre is weighted by area, so a blob growing in from size 0 moves it
+  // continuously.
+  let cen = null;
+  if (p.organic > 1) {
+    let sw = 0, sx = 0, sy = 0;
+    for (let i = 0; i < n; i++) {
+      const w = Math.max(blobs[i].r, 0) ** 2;
+      sw += w; sx += blobs[i].x * w; sy += blobs[i].y * w;
+    }
+    if (sw > 0) cen = { x: sx / sw, y: sy / sw };
+  }
   for (let i = 0; i < n; i++) {
     const A0 = blobs[i];
     for (let j = i + 1; j < n; j++) {
@@ -110,7 +122,7 @@ export function computePairs(blobs, p, edits) {
 
       const ed = edits && edits.size ? edits.get(`${A.id}-${B.id}`) : undefined;
       cands.push({
-        A, B, ia: swap ? j : i, ib: swap ? i : j, d, gap, ed,
+        A, B, ia: swap ? j : i, ib: swap ? i : j, d, gap, ed, cen,
         ux: dx / d, uy: dy / d,
         t: Math.max(gap, 0) / reachDist,
         g: gap / reachDist,
@@ -205,8 +217,8 @@ function buildPair(c, t, p) {
   const ed = c.ed;
   const thick = ed && ed.thick != null ? ed.thick : 1;
   const flare = ed && ed.flare != null ? ed.flare : 1;
-  const c0 = ed && ed.c0 ? ed.c0 : 0;
-  const c1 = ed && ed.c1 ? ed.c1 : 0;
+  const ec0 = ed && ed.c0 ? ed.c0 : 0;
+  const ec1 = ed && ed.c1 ? ed.c1 : 0;
   const snap = clamp(p.snap, 0.2, 0.97);
   const minR = Math.min(A.r, B.r);
   const pinch = smoothstep(snap, 1, t); // 0 until the neck snaps, 1 at reach
@@ -234,14 +246,46 @@ function buildPair(c, t, p) {
   const x0 = A.x + ux * s0, y0 = A.y + uy * s0;
   const x1 = A.x + ux * s1, y1 = A.y + uy * s1;
 
-  const bend = p.organic * 0.16 * hash3(A.id, B.id, 1);
   const neck = ed && ed.neck != null ? ed.neck : 0.5 + p.organic * 0.16 * hash3(A.id, B.id, 2);
+  // Organic 0…1: a slight per-bridge bend. 1…2 fades in the wavy,
+  // membrane-like character (organicExtras). Exactly 0 below 1.
+  const wave = p.organic > 1 ? Math.min(p.organic - 1, 1) : 0;
+  let bend = p.organic * 0.16 * hash3(A.id, B.id, 1);
+  let oc0 = 0, oc1 = 0, bulge = 0, bulgeT = 0.5, ripple = 0, bulge2 = 0, bulgeT2 = 0.5;
+  if (wave > 0) {
+    const h = (k) => hash3(A.id, B.id, k);
+    // Bow away from the composition's centre (a random side when the
+    // centre lies on the bridge's own line, as with two blobs).
+    let side = 0;
+    if (c.cen) side = -clamp(((c.cen.x - A.x) * -uy + (c.cen.y - A.y) * ux) / (0.3 * Math.max(d, 1e-3)), -1, 1);
+    const bow = side + (1 - Math.abs(side)) * (h(11) < 0 ? -1 : 1);
+    bend += wave * (0.17 + 0.06 * h(12)) * bow;
+    // An S-wave along the bridge, through the same Bézier handles the user drags.
+    const sw = wave * 0.55 * h(13);
+    oc0 = sw + wave * 0.12 * h(14);
+    oc1 = -sw + wave * 0.12 * h(15);
+    // A knuckle: the bridge swells on one side of its neck. It fades out
+    // towards the snap point like the neck itself, so pinching is untouched.
+    const g = t < snap ? (1 - t / snap) * (1 - t / snap) : 0;
+    bulge = wave * minR * p.thickness * thick * (0.45 + 0.4 * Math.abs(h(16))) * g;
+    bulgeT = clamp(neck + (h(17) < 0 ? -1 : 1) * (0.22 + 0.08 * Math.abs(h(17))), 0.1, 0.9);
+    // A finer undulation along the centre-line, and a second, smaller
+    // knuckle on the other side of the neck.
+    ripple = wave * 0.05 * h(18);
+    bulge2 = bulge * (0.35 + 0.3 * Math.abs(h(19)));
+    bulgeT2 = clamp(neck - (h(17) < 0 ? -1 : 1) * (0.25 + 0.1 * Math.abs(h(19))), 0.1, 0.9);
+  }
   const k = Math.max(p.smooth * minR * (0.35 + 0.65 * life), 1e-3) * (1 - pinch * 0.999);
 
+  const c0 = ec0 + oc0, c1 = ec1 + oc1;
+  // Curved bridges are measured differently (curvedDist); fade from the
+  // straight model into it over the first bit of curvature, so turning
+  // Organic past 1 or starting to drag a handle never pops.
+  const curve = Math.max(smoothstep(0, 0.1, wave), smoothstep(0, 0.04, Math.abs(ec0) + Math.abs(ec1)));
   const L = s1 - s0;
   // Handles move the centre-line sideways by at most 4/9·(|c0| + |c1|)·L.
   const ch = Math.abs(c0) + Math.abs(c1);
-  const bound = L * 0.5 + Math.abs(bend) * L + ch * 0.45 * L + Math.max(w0, w1, wMid, 0) + 1;
+  const bound = L * 0.5 + (Math.abs(bend) + Math.abs(ripple)) * L + ch * 0.45 * L + Math.max(w0, w1, wMid, 0) + bulge + bulge2 + 1;
 
   // Approaching the snap, the profile turns from a long thread into a
   // localized pinch, so a breaking bridge never lingers as a hairline.
@@ -250,7 +294,7 @@ function buildPair(c, t, p) {
   const Ls = Math.max(L, 1e-4);
   return {
     ia: c.ia, ib: c.ib, a: A.id, b: B.id,
-    x0, y0, x1, y1, w0, w1, wMid, neck, bend, k, taper, c0, c1,
+    x0, y0, x1, y1, w0, w1, wMid, neck, bend, k, taper, c0, c1, bulge, bulgeT, ripple, bulge2, bulgeT2, curve,
     cx: (x0 + x1) * 0.5, cy: (y0 + y1) * 0.5, bound,
     // Span of the segment that lies outside both blobs (for clearance tests).
     ta: Math.min((A.r * 0.32) / Ls, 0.5),
@@ -263,8 +307,14 @@ function profileAt(br, tx) {
   const m = br.neck;
   const u = tx < m ? (m - tx) / m : (tx - m) / (1 - m);
   const wEnd = tx < m ? br.w0 : br.w1;
-  return br.wMid + (wEnd - br.wMid) * Math.pow(u, br.taper);
+  const w = br.wMid + (wEnd - br.wMid) * Math.pow(u, br.taper);
+  if (!br.bulge) return w;
+  const z = (tx - br.bulgeT) / BULGE_W, z2 = (tx - br.bulgeT2) / BULGE_W;
+  return w + br.bulge * Math.exp(-z * z) + br.bulge2 * Math.exp(-z2 * z2);
 }
+
+/** Width of an organic knuckle along the bridge (Gaussian σ·√2). */
+export const BULGE_W = 0.11;
 
 const SAMPLES = 9;
 
@@ -276,7 +326,9 @@ function sampleBridge(br) {
   const ux = bx / L, uy = by / L;
   for (let s = 0; s < SAMPLES; s++) {
     const tx = br.ta + (br.tb - br.ta) * (s / (SAMPLES - 1));
-    const off = br.bend * L * 4 * tx * (1 - tx) + handleOffset(br.c0, br.c1, tx) * L;
+    // Plain bend first, in its original operation order (bit-identical output).
+    let off = br.bend * L * 4 * tx * (1 - tx);
+    if (br.c0 || br.c1 || br.ripple) off += (centreOffset(br, tx) - br.bend * 4 * tx * (1 - tx)) * L;
     out[s * 3] = br.x0 + ux * tx * L - uy * off;
     out[s * 3 + 1] = br.y0 + uy * tx * L + ux * off;
     out[s * 3 + 2] = Math.max(profileAt(br, tx), 0);
@@ -531,6 +583,13 @@ export function handleOffset(c0, c1, tx) {
   return 3 * s * tx * (s * c0 + tx * c1);
 }
 
+/** Sideways offset of a bridge's centre-line at tx, × L. MIRRORED in the shader. */
+export function centreOffset(br, tx) {
+  let o = br.bend * 4 * tx * (1 - tx) + handleOffset(br.c0, br.c1, tx);
+  if (br.ripple) o += br.ripple * Math.sin(3 * Math.PI * tx);
+  return o;
+}
+
 /** Segments of the polyline a hand-curved bridge is measured against (even). */
 export const CURVE_SEGS = 48;
 
@@ -577,7 +636,7 @@ function curvedDist(x, y, L, br, out) {
   for (let s = 1; s <= CURVE_SEGS; s++) {
     const tb = s <= half ? (m * s) / half : m + ((1 - m) * (s - half)) / half;
     const bx = tb * L;
-    const by = (br.bend * 4 * tb * (1 - tb) + handleOffset(br.c0, br.c1, tb)) * L;
+    const by = centreOffset(br, tb) * L;
     const rb = profileAt(br, tb);
     const dd = roundCone(x - ax, y - ay, bx - ax, by - ay, ra, rb);
     if (dd < best) { best = dd; bt = ta + (tb - ta) * RC.h; }
@@ -598,10 +657,22 @@ export function bridgeDist(px, py, br, out) {
   const ux = bx / L, uy = by / L;
   const rx = px - br.x0, ry = py - br.y0;
   const x = rx * ux + ry * uy;
-  let y = -rx * uy + ry * ux;
-  if (br.c0 || br.c1) return curvedDist(x, y, L, br, out);
+  const y = -rx * uy + ry * ux;
+  if (br.c0 || br.c1 || br.bulge || br.ripple) {
+    const dc = curvedDist(x, y, L, br, out);
+    if (br.curve >= 1) return dc;
+    const tc = out ? out[1] : 0;
+    const ds = straightDist(x, y, L, br, out);
+    if (out && br.curve > 0.5) out[1] = tc;
+    return ds + (dc - ds) * br.curve;
+  }
+  return straightDist(x, y, L, br, out);
+}
+
+/** The original bridge model: a bent capsule measured across its axis. */
+function straightDist(x, y0, L, br, out) {
   const tx = clamp(x / L, 0, 1);
-  y -= br.bend * L * 4 * tx * (1 - tx);
+  const y = y0 - br.bend * L * 4 * tx * (1 - tx);
   const m = br.neck;
   let u, wEnd;
   if (tx < m) { u = (m - tx) / m; wEnd = br.w0; }

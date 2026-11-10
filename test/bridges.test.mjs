@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computePairs, evalField, bridgeDist, DEFAULT_PARAMS, BRIDGE_RANGES } from '../src/field.js';
 import { normalizeDoc } from '../src/model.js';
+import { drawnRadius } from '../src/scene.js';
 
 const P = { ...DEFAULT_PARAMS };
 const edits = (list) => new Map(list.map((e) => [`${e.a}-${e.b}`, e]));
@@ -134,4 +135,90 @@ test('normalizeDoc sanitizes bridge edits', () => {
     { a: 1, b: 3, c0: 0, c1: 0, neck: null, thick: 1, flare: 1, off: true },
   ]);
   assert.deepEqual(normalizeDoc({ blobs: [] }).bridges, []);
+});
+
+// ---------------------------------------------------------------- Organic above 1
+
+const ORG = { ...P, reach: 5, thickness: 1, flare: 0.2, smooth: 0.55, snap: 0.9, taper: 3, organic: 2 };
+const triad = (dx = 0) => [
+  { id: 1, x: 475, y: 188, r: 160 }, { id: 2, x: 903 + dx, y: 687, r: 160 }, { id: 3, x: 170, y: 910, r: 154 },
+];
+function field(blobs, p, step = 12) {
+  const pairs = computePairs(blobs, p);
+  const out = [];
+  for (let y = 0; y <= 1080; y += step) for (let x = 0; x <= 1080; x += step) {
+    out.push(Math.max(-4, Math.min(4, evalField(x, y, blobs, pairs, p))));
+  }
+  return out;
+}
+const maxJump = (a, b) => a.reduce((m, v, i) => Math.max(m, Math.abs(v - b[i])), 0);
+
+test('organic up to 1 gives straight-bridge geometry (no waves)', () => {
+  for (const q of computePairs(triad(), { ...ORG, organic: 1 })) {
+    assert.equal(q.c0, 0); assert.equal(q.c1, 0); assert.equal(q.bulge, 0); assert.equal(q.ripple, 0);
+  }
+});
+
+test('organic waves are continuous while a blob sweeps across the composition', () => {
+  // Moving one blob also moves the centre the bridges bow away from.
+  let prev = null, worst = 0;
+  for (let dx = -300; dx <= 100; dx += 0.5) {
+    const s = field(triad(dx), ORG, 27);
+    if (prev) worst = Math.max(worst, maxJump(s, prev));
+    prev = s;
+  }
+  assert.ok(worst < 2, `max field jump per 0.5-unit step ${worst.toFixed(3)}`);
+});
+
+test('organic waves stay continuous while blobs separate past the snap', () => {
+  const p = { ...P, organic: 2 };
+  const reach = p.reach * (60 + 45) / 2;
+  let prev = null, worst = 0;
+  for (let gap = -40; gap <= reach + 20; gap += 0.25) {
+    const blobs = pair(gap);
+    const pairs = computePairs(blobs, p);
+    const s = [];
+    for (let y = 40; y <= 360; y += 10) for (let x = 0; x <= 600; x += 10) s.push(Math.max(-4, Math.min(4, evalField(x, y, blobs, pairs, p))));
+    if (prev) worst = Math.max(worst, maxJump(s, prev));
+    prev = s;
+  }
+  assert.ok(worst < 1.2, `max field jump per step ${worst.toFixed(3)}`);
+});
+
+test('a blob growing in from nothing does not make the organic bow jump', () => {
+  // Visible band only: a size-0 blob's bridges switch on ≥ 2.5 units outside
+  // the surface (field.js kill), as in the keyframe growth test.
+  let prev = null, worst = 0;
+  for (let r = 0; r <= 16; r += 0.1) {
+    const blobs = triad();
+    if (r > 0) blobs.push({ id: 4, x: 540, y: 540, r: drawnRadius(r), grow: true });
+    const s = field(blobs, ORG, 24).map((v) => Math.min(v, 2.4));
+    if (prev) worst = Math.max(worst, maxJump(s, prev));
+    prev = s;
+  }
+  assert.ok(worst < 1, `max field jump per step ${worst.toFixed(3)}`);
+});
+
+test('the Organic slider fades the waves in smoothly, also through 1', () => {
+  let prev = null, worst = 0, at = 0;
+  for (let o = 0.9; o <= 2.0001; o += 0.005) {
+    const s = field(triad(), { ...ORG, organic: o }, 24);
+    if (prev) { const j = maxJump(s, prev); if (j > worst) { worst = j; at = o; } }
+    prev = s;
+  }
+  assert.ok(worst < 2, `max field jump per 0.005 of the slider ${worst.toFixed(3)} at ${at.toFixed(3)}`);
+});
+
+test('organic bridges: true distance and a valid bounding circle', () => {
+  for (const o of [1.3, 2]) {
+    for (const q of computePairs(triad(), { ...ORG, organic: o })) {
+      let lip = 0;
+      for (let y = 0; y <= 1080; y += 9) for (let x = 0; x <= 1080; x += 9) {
+        const d = bridgeDist(x, y, q, null);
+        assert.ok(d >= Math.hypot(x - q.cx, y - q.cy) - q.bound - 1e-6, 'outside the bounding circle');
+        if (d < 40) lip = Math.max(lip, Math.abs(bridgeDist(x + 0.5, y, q, null) - d) / 0.5, Math.abs(bridgeDist(x, y + 0.5, q, null) - d) / 0.5);
+      }
+      assert.ok(lip <= 1 + 1e-6, `organic ${o}: field changes ${lip.toFixed(3)}× faster than distance`);
+    }
+  }
 });

@@ -14,7 +14,7 @@ const PARAMS = [
   ['flare', 'Flare', 'How wide a bridge is where it grows out of a blob'],
   ['taper', 'Taper', 'Higher keeps the neck thin for longer, with a sharper flare'],
   ['smooth', 'Smoothness', 'Size of the fillets where bridges meet blobs'],
-  ['organic', 'Organic', 'Per-bridge bend and asymmetry'],
+  ['organic', 'Organic', 'Per-bridge bend and asymmetry. Above 1, bridges bow outward and turn wavy, with ripples and knuckles'],
   ['maxBridges', 'Max bridges', 'Most bridges one blob keeps at once; the weakest let go. 12 = no limit'],
 ];
 

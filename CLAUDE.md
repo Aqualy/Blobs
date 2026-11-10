@@ -22,7 +22,7 @@ npm test    # node --test "test/*.test.mjs"
 | File | Role |
 | --- | --- |
 | `src/field.js` | **Single source of truth for the shape.** `computePairs()` builds bridges; `evalField`/`evalFieldWeights` evaluate the SDF on the CPU. Also holds `DEFAULT_PARAMS`, `PARAM_RANGES`, `LIMITS` (128 blobs / 512 pairs), and no-overlap suppression. |
-| `src/renderer.js` | WebGL2 fragment shader that **mirrors `bridgeDist` + smooth-min from field.js**. Pair data goes in through an RGBA32F texture (`COLS` = 5 texels per row; texel 4 holds the bridge handles c0, c1). Any change to the bridge SDF or colour blending must be made in **both** places. Tile culling: `_buildTiles` gives each screen tile its own item list (RG32UI header + R16UI list textures). `skipUnchanged` (editor only) leaves the canvas alone when a frame is identical to the last. |
+| `src/renderer.js` | WebGL2 fragment shader that **mirrors `bridgeDist` + smooth-min from field.js**. Pair data goes in through an RGBA32F texture (`COLS` = 6 texels per row; texels 4–5 hold the Bézier handles and the organic waves). Any change to the bridge SDF or colour blending must be made in **both** places. Tile culling: `_buildTiles` gives each screen tile its own item list (RG32UI header + R16UI list textures). `skipUnchanged` (editor only) leaves the canvas alone when a frame is identical to the last. |
 | `src/model.js` | Document schema, `normalizeDoc` (sanitizes all loaded/URL/localStorage input), motion (`resolveBlob`: drift/orbit/swing/pulse, all periodic in `doc.loop` for seamless video), presets (Triad = reference image, Lime orbit, Chain, Cluster, Pulse ring, Blank). |
 | `src/keys.js` | Keyframes. Per blob `keys = { pos: [{t,x,y,ease}], r: [{t,v,ease}], curve }`. A track with keys overrides the static x/y or r (`baseAt`); procedural motion adds on top. Temporal easing is a cubic Hermite per segment (ease key = zero speed). The route is a centripetal Catmull–Rom spline. `normalizeKeys` sanitizes; key times sit on a 0.01 s grid in the editor. |
 | `src/scene.js` | `frameAt(doc, time)` returns `{ blobs, pairs, all }`. `blobs` is what gets drawn: size-0 blobs are left out, and blobs with keyframed size below `VANISH_R` sink via `drawnRadius`. `all` holds every blob at its true size in document order, for hit testing and the overlay. |
@@ -47,6 +47,17 @@ npm test    # node --test "test/*.test.mjs"
 - A curved bridge (c0 or c1 ≠ 0) is measured by `curvedDist`. It follows the Bézier as a `CURVE_SEGS` = 48 polyline with a vertex exactly at the neck, and the bridge is the union (hard min) of **round cones** (iq's uneven capsule), each spanning the profile widths at its two ends. This is a true distance. The first version offset the straight bridge sideways and divided by sqrt(1+slope²); with a big flare it folded into spikes (the user reported it). Pieces tried and rejected: per-segment capsules using the projected width left scallops (end caps bulge where width changes fast), and 24 segments left visible facets. Negative radii (retracting bridges): grow both by sh, then add sh back. `bound` covers the polyline hull plus the max width. Tests: "true distance: no folds or spikes" (1-Lipschitz; fails on the old method) and "the bounding circle holds the whole curved bridge".
 - `thick` scales the neck (wMid), `flare` scales w0/w1, `neck` replaces the hashed neck position, and `off` sets sup = 1. Every handle branch is skipped when c0 = c1 = 0, and multiplying by 1 is exact, so documents without edits stay bit-identical (checked against the previous commit). The shader mirrors all of it, and a browser check compared GPU and CPU on 128k pixels of strongly edited bridges.
 - Editor: `state.bridge = {a, b}`. Hit order is bridge handles → key points → knob → blobs → bridges (and the dashed links of hidden bridges). `Delete` hides the bridge and `Esc` deselects it. Handle drags pause playback.
+
+## Organic above 1 (wavy, membrane-like bridges)
+
+- `PARAM_RANGES.organic` is [0, 2]. Up to 1 nothing changed (bit-identical). `wave = organic − 1` (0…1) fades in four things, all from `hash3(idA, idB, 11…19)`:
+  - an outward **bow** added to `bend`, away from the area-weighted (r²) centre of all blobs; area weighting keeps it continuous when a blob grows from size 0;
+  - an **S-wave** added to `c0`/`c1` (so pair `c0`/`c1` = hand edit + organic; the editor subtracts the organic part when you drag a handle);
+  - a **ripple** `sin(3πt)` on the centre-line (`centreOffset`);
+  - two **knuckles** (Gaussian width bumps, `BULGE_W`) on either side of the neck, scaled by (1 − t/snap)² so they vanish at the snap and pinching is untouched.
+- Bridges with waves or handles use `curvedDist`. `curve` (0…1) cross-fades from `straightDist` over the first 0.1 of wave or 0.04 of hand curvature, so the slider and the first handle drag never pop. Pair rows are `COLS` = 6 texels; texel 5 = (ripple, bulge2, bulgeT2, curve).
+- `sampleBridge` keeps the plain bend in its original operation order: a reordered multiply changed No overlap results in the last bit.
+- Tuned against the user's reference (an SVG of a wavy triad). The Membrane preset reproduces it: reach 5, thickness 1, flare 0.2, smooth 0.55, snap 0.9, taper 3, organic 2.
 
 ## Keyframes (invariants)
 

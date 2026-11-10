@@ -1,5 +1,5 @@
 // Blobs — editor application.
-import { DEFAULT_PARAMS, LIMITS, BRIDGE_RANGES, bridgeDist, handleOffset } from './field.js';
+import { DEFAULT_PARAMS, LIMITS, BRIDGE_RANGES, bridgeDist, centreOffset } from './field.js';
 import {
   PALETTE, BOARD_PRESETS, PRESETS,
   emptyDoc, normalizeDoc, makeBlob, nextBlobId, isAnimated, resolveBlob,
@@ -277,7 +277,7 @@ function bridgeGeom(q) {
   const L = Math.max(Math.hypot(bx, by), 1e-4);
   const ux = bx / L, uy = by / L, nx = -uy, ny = ux;
   const at = (tx, side) => ({ x: q.x0 + ux * tx * L + nx * side * L, y: q.y0 + uy * tx * L + ny * side * L });
-  const curve = (tx) => at(tx, q.bend * 4 * tx * (1 - tx) + handleOffset(q.c0, q.c1, tx));
+  const curve = (tx) => at(tx, centreOffset(q, tx));
   return {
     L, ux, uy, nx, ny, curve,
     p0: at(0, 0), p3: at(1, 0),
@@ -848,7 +848,11 @@ overlay.addEventListener('pointermove', (e) => {
     const ed = bridgeEdit();
     const R = BRIDGE_RANGES;
     if (d.which === 'neck') ed.neck = round2(clamp(along, ...R.neck) * 100) / 100;
-    else ed[d.which] = Math.round(clamp(side - (4 / 3) * q.bend, ...R.c) * 1000) / 1000;
+    else {
+      // q.c0/c1 include the Organic waves; the edit is the hand-made part.
+      const organic = q[d.which] - (ed[d.which] || 0);
+      ed[d.which] = Math.round(clamp(side - (4 / 3) * q.bend - organic, ...R.c) * 1000) / 1000;
+    }
     d.changed = true;
     notify();
     requestRender();
@@ -1239,7 +1243,10 @@ const editor = {
     const sb = editor.selectedBridge();
     if (!sb?.pair) return;
     const ed = bridgeEdit();
-    ed.c0 = ed.c1 = Math.round(-(4 / 3) * sb.pair.bend * 1000) / 1000;
+    // Cancel the bend and the Organic S-wave (q.c0/c1 hold edit + organic).
+    const q = sb.pair;
+    ed.c0 = Math.round(clamp(-(4 / 3) * q.bend - (q.c0 - ed.c0), ...BRIDGE_RANGES.c) * 1000) / 1000;
+    ed.c1 = Math.round(clamp(-(4 / 3) * q.bend - (q.c1 - ed.c1), ...BRIDGE_RANGES.c) * 1000) / 1000;
     pruneEdits(); commit(); edited();
   },
   resetBridge() {

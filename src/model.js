@@ -255,6 +255,20 @@ export const PRESETS = [
     }
     return d;
   }),
+  preset('Membrane (organic)', () => {
+    // Organic above 1: bridges bow outward like a membrane, with an S-wave,
+    // ripples and knuckles. Modelled on the user's wavy reference triad.
+    const d = emptyDoc();
+    d.background = '#dddddd';
+    Object.assign(d.params, { reach: 5, thickness: 1, flare: 0.2, smooth: 0.55, snap: 0.9, taper: 3, organic: 2 });
+    const c = '#111111';
+    d.blobs = [
+      makeBlob(1, 475, 188, 160, c, { type: 'drift', amp: 16, cycles: 1 }),
+      makeBlob(2, 903, 687, 160, c, { type: 'drift', amp: 16, cycles: 1 }),
+      makeBlob(3, 170, 910, 154, c, { type: 'drift', amp: 16, cycles: 1 }),
+    ];
+    return d;
+  }),
   preset('Appear (keyframes)', () => {
     // Three orbs grow out of nothing, each along its own route, settle into a
     // triad, then gather in the middle and vanish so the loop is seamless.

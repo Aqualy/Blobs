@@ -1,10 +1,10 @@
 // WebGL2 renderer: evaluates the same field as field.js per pixel.
-import { LIMITS, blobK, COLOR_BAND, CURVE_SEGS } from './field.js';
+import { LIMITS, blobK, COLOR_BAND, CURVE_SEGS, BULGE_W } from './field.js';
 
 // Data texture: one row per blob (rows 0…maxBlobs-1) and per bridge after
 // that, COLS RGBA32F texels per row. Blob rows use texels 0–1; bridge rows
-// use all five (texel 4 = Bézier handle offsets c0, c1).
-const COLS = 5;
+// use all six (texels 4–5: Bézier handles and organic waves, see the shader).
+const COLS = 6;
 const ROW = COLS * 4;
 
 // Width of the tile-list texture (a power of two: the shader uses shifts).
@@ -90,7 +90,8 @@ void main() {
     vec4 t0 = fetch(row, 0);   // x0 y0 x1 y1
     vec4 t1 = fetch(row, 1);   // w0 w1 wMid neck
     vec4 t2 = fetch(row, 2);   // bend k taper ia
-    vec4 t4 = fetch(row, 4);   // c0 c1 (bridge handles) - -
+    vec4 t4 = fetch(row, 4);   // c0 c1 (Bézier handles), bulge, bulgeT (organic knuckle)
+    vec4 t5 = fetch(row, 5);   // ripple, bulge2, bulgeT2 (organic), curve (straight → curved fade)
     vec2 ba = t0.zw - t0.xy;
     float L = max(length(ba), 1e-4);
     vec2 u = ba / L;
@@ -100,7 +101,9 @@ void main() {
     float m = t1.w;
     float tx;
     float bd;
-    if (t4.x != 0.0 || t4.y != 0.0) {
+    bool curved = t4.x != 0.0 || t4.y != 0.0 || t4.z != 0.0 || t5.x != 0.0;
+    float dc = 0.0, tc = 0.0;
+    if (curved) {
       // Hand-curved bridge: union of round cones along the Bézier
       // centre-line, with a vertex at the neck. Mirrors curvedDist in field.js.
       const int HALF = ${CURVE_SEGS / 2};
@@ -108,13 +111,24 @@ void main() {
       float bt = 0.0;
       vec2 a = vec2(0.0);
       float ta = 0.0;
-      float ra = t1.x; // profile at t = 0 is w0
+      float ra = t1.x; // profile at t = 0: w0 (+ the knuckle's tail)
+      if (t4.z != 0.0) {
+        float z0 = t4.w / ${BULGE_W}, z1 = t5.z / ${BULGE_W};
+        ra += t4.z * exp(-z0 * z0) + t5.y * exp(-z1 * z1);
+      }
       for (int s = 1; s <= ${CURVE_SEGS}; s++) {
         float tb = s <= HALF ? m * float(s) / float(HALF) : m + (1.0 - m) * float(s - HALF) / float(HALF);
         float sb = 1.0 - tb;
-        vec2 b = vec2(tb * L, (t2.x * 4.0 * tb * (1.0 - tb) + 3.0 * sb * tb * (sb * t4.x + tb * t4.y)) * L);
+        // Mirrors centreOffset in field.js.
+        float ob = t2.x * 4.0 * tb * (1.0 - tb) + 3.0 * sb * tb * (sb * t4.x + tb * t4.y);
+        if (t5.x != 0.0) ob += t5.x * sin(3.0 * 3.14159265358979 * tb);
+        vec2 b = vec2(tb * L, ob * L);
         float uu = tb < m ? (m - tb) / m : (tb - m) / (1.0 - m);
         float rb = t1.z + ((tb < m ? t1.x : t1.y) - t1.z) * pow(uu, t2.z);
+        if (t4.z != 0.0) {
+          float zb = (tb - t4.w) / ${BULGE_W}, zc = (tb - t5.z) / ${BULGE_W};
+          rb += t4.z * exp(-zb * zb) + t5.y * exp(-zc * zc);
+        }
         // Round cone a→b with radii ra, rb (iq's uneven capsule).
         float sh = max(0.0, -min(ra, rb));
         float r0 = ra + sh, r1 = rb + sh;
@@ -140,15 +154,24 @@ void main() {
         ta = tb;
         ra = rb;
       }
-      bd = best;
-      tx = bt;
+      dc = best;
+      tc = bt;
+    }
+    if (curved && t5.w >= 1.0) {
+      bd = dc;
+      tx = tc;
     } else {
+      // Mirrors straightDist in field.js.
       tx = clamp(x / L, 0.0, 1.0);
       y -= t2.x * L * 4.0 * tx * (1.0 - tx);
       float uu = tx < m ? (m - tx) / m : (tx - m) / (1.0 - m);
       float wEnd = tx < m ? t1.x : t1.y;
       float rad = t1.z + (wEnd - t1.z) * pow(uu, t2.z);
       bd = length(vec2(x - tx * L, y)) - rad;
+      if (curved) {
+        bd = bd + (dc - bd) * t5.w;
+        if (t5.w > 0.5) tx = tc;
+      }
     }
     float w;
     d = sminw(d, bd, k, w);
@@ -411,7 +434,8 @@ export class Renderer {
       D[o + 4] = p.w0; D[o + 5] = p.w1; D[o + 6] = p.wMid; D[o + 7] = p.neck;
       D[o + 8] = p.bend; D[o + 9] = p.k; D[o + 10] = p.taper; D[o + 11] = p.ia;
       D[o + 12] = p.cx; D[o + 13] = p.cy; D[o + 14] = p.bound; D[o + 15] = p.ib;
-      D[o + 16] = p.c0 || 0; D[o + 17] = p.c1 || 0;
+      D[o + 16] = p.c0 || 0; D[o + 17] = p.c1 || 0; D[o + 18] = p.bulge || 0; D[o + 19] = p.bulgeT || 0;
+      D[o + 20] = p.ripple || 0; D[o + 21] = p.bulge2 || 0; D[o + 22] = p.bulgeT2 || 0; D[o + 23] = p.curve || 0;
     }
 
     const W = this.canvas.width, H = this.canvas.height;
