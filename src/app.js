@@ -2,8 +2,9 @@
 import { DEFAULT_PARAMS, LIMITS } from './field.js';
 import {
   PALETTE, BOARD_PRESETS, PRESETS,
-  emptyDoc, normalizeDoc, makeBlob, nextBlobId, isAnimated,
+  emptyDoc, normalizeDoc, makeBlob, nextBlobId, isAnimated, resolveBlob,
 } from './model.js';
+import { baseAt, hasKeys, setKey, keyAt, sortTrack, TRACKS, KEY_EPS } from './keys.js';
 import { Renderer } from './renderer.js';
 import { frameAt } from './scene.js';
 import { exportPNG, exportSVG, recordVideo, videoSupport, download } from './export.js';
@@ -11,6 +12,7 @@ import { store, notify } from './ui/store.js';
 import './ui/topbar.js';
 import './ui/panel.js';
 import './ui/dialogs.js';
+import './ui/timeline.js';
 
 const $ = (s, root = document) => root.querySelector(s);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -27,7 +29,9 @@ const state = {
   selection: new Set(),
   hover: null,
   view: { zoom: 1, x: 0, y: 0 },   // screen(css px) = board * zoom + (x, y)
-  frame: { blobs: [], pairs: [] },
+  frame: { blobs: [], pairs: [], all: [] },
+  /** Selected keyframes (the key objects themselves). */
+  selectedKeys: new Set(),
   drag: null,
   spaceDown: false,
   spaceUsed: false,
@@ -84,6 +88,7 @@ function restore(snap) {
   doc = JSON.parse(snap);
   const ids = new Set(doc.blobs.map((b) => b.id));
   for (const id of [...state.selection]) if (!ids.has(id)) state.selection.delete(id);
+  state.selectedKeys.clear();
   state.time = state.time % doc.loop;
   notify();
   scheduleSave();
@@ -242,15 +247,15 @@ function knobPos(b) {
 function motionPath(src) {
   // Sample the resolved path of a blob across one loop.
   const pts = [];
-  const N = 96;
-  const tmp = { ...src, motion: { ...src.motion, pulse: 0 } };
-  const one = { ...doc, blobs: [tmp] };
+  const N = hasKeys(src, 'pos') ? 240 : 96;
+  const out = {};
   for (let i = 0; i <= N; i++) {
-    const b = frameAt(one, (i / N) * doc.loop).blobs[0];
-    pts.push(b.x, b.y);
+    resolveBlob(src, (i / N) * doc.loop, doc.loop, out);
+    pts.push(out.x, out.y);
   }
   return pts;
 }
+const hasPath = (src) => src.motion.type !== 'none' || src.keys.pos.length > 1;
 
 function drawOverlay(fr) {
   const ctx = octx;
@@ -265,14 +270,15 @@ function drawOverlay(fr) {
   ctx.strokeRect(Math.round(v.x) - 0.5, Math.round(v.y) - 0.5, Math.round(doc.board.w * v.zoom) + 1, Math.round(doc.board.h * v.zoom) + 1);
 
   const byId = new Map();
-  fr.blobs.forEach((b, i) => byId.set(b.id, { b, src: doc.blobs[i] }));
+  fr.all.forEach((b, i) => byId.set(b.id, { b, src: doc.blobs[i] }));
 
   // Motion paths of selected animated blobs
   ctx.setLineDash([4, 4]);
   ctx.strokeStyle = 'rgba(197,217,47,0.45)';
+  ctx.lineWidth = 1;
   for (const id of state.selection) {
     const e = byId.get(id);
-    if (!e || e.src.motion.type === 'none') continue;
+    if (!e || !hasPath(e.src)) continue;
     const pts = motionPath(e.src);
     ctx.beginPath();
     for (let i = 0; i < pts.length; i += 2) {
@@ -283,6 +289,23 @@ function drawOverlay(fr) {
   }
   ctx.setLineDash([]);
 
+  // Position keyframes of selected blobs, draggable like AE's motion path.
+  for (const id of state.selection) {
+    const e = byId.get(id);
+    if (!e) continue;
+    for (const k of e.src.keys.pos) {
+      const x = k.x * v.zoom + v.x, y = k.y * v.zoom + v.y;
+      const on = state.selectedKeys.has(k) || Math.abs(k.t - state.time) <= KEY_EPS;
+      ctx.beginPath();
+      ctx.rect(Math.round(x) - 3.5, Math.round(y) - 3.5, 7, 7);
+      ctx.fillStyle = on ? '#c5d92f' : '#121212';
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#c5d92f';
+      ctx.stroke();
+    }
+  }
+
   const ring = (b, color, width) => {
     ctx.beginPath();
     ctx.arc(b.x * v.zoom + v.x, b.y * v.zoom + v.y, Math.max(b.r * v.zoom, 2), 0, Math.PI * 2);
@@ -290,7 +313,21 @@ function drawOverlay(fr) {
     ctx.lineWidth = width;
     ctx.stroke();
   };
-  const outline = (b, color, width) => { ring(b, 'rgba(0,0,0,0.55)', width + 2); ring(b, color, width); };
+  const outline = (b, color, width) => {
+    if (b.r * v.zoom < 1.5) {
+      // Not there at this moment (size 0): mark where it is.
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.arc(b.x * v.zoom + v.x, b.y * v.zoom + v.y, 8, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      return;
+    }
+    ring(b, 'rgba(0,0,0,0.55)', width + 2);
+    ring(b, color, width);
+  };
 
   if (state.hover != null && !state.selection.has(state.hover) && !state.drag) {
     const e = byId.get(state.hover);
@@ -326,7 +363,7 @@ function drawOverlay(fr) {
 function hitBlob(sx, sy) {
   const p = screenToBoard(sx, sy);
   const tol = 3 / state.view.zoom;
-  const bl = state.frame.blobs;
+  const bl = state.frame.all;
   for (let i = bl.length - 1; i >= 0; i--) {
     const b = bl[i];
     if (Math.hypot(p.x - b.x, p.y - b.y) <= b.r + tol) return b.id;
@@ -334,15 +371,57 @@ function hitBlob(sx, sy) {
   return null;
 }
 function hitKnob(sx, sy) {
-  for (const b of state.frame.blobs) {
+  for (const b of state.frame.all) {
     if (!state.selection.has(b.id)) continue;
     const k = knobPos(b);
     if (Math.hypot(sx - k.x, sy - k.y) <= 9) return b;
   }
   return null;
 }
+function hitKeyPoint(sx, sy) {
+  const v = state.view;
+  for (const b of selectedBlobs()) {
+    for (let i = b.keys.pos.length - 1; i >= 0; i--) {
+      const k = b.keys.pos[i];
+      if (Math.hypot(k.x * v.zoom + v.x - sx, k.y * v.zoom + v.y - sy) <= 7) return k;
+    }
+  }
+  return null;
+}
 const blobById = (id) => doc.blobs.find((b) => b.id === id);
 const selectedBlobs = () => doc.blobs.filter((b) => state.selection.has(b.id));
+
+// ---------------------------------------------------------------- keyframed editing
+// When a track has keys, editing that property writes a key at the playhead
+// (After Effects' stopwatch behaviour); otherwise it edits the static value.
+const KEY_STEP = 0.01; // key times sit on a 1/100 s grid
+const snapTime = (t) => Math.round(t / KEY_STEP) * KEY_STEP;
+const keyTime = () => clamp(snapTime(state.time), 0, doc.loop);
+const baseOf = (b) => baseAt(b, state.time, {});
+
+function setBasePos(b, x, y) {
+  if (hasKeys(b, 'pos')) setKey(b.keys.pos, keyTime(), { x, y });
+  else { b.x = x; b.y = y; }
+}
+function setBaseR(b, r) {
+  if (hasKeys(b, 'r')) setKey(b.keys.r, keyTime(), { v: clamp(r, 0, 2000) });
+  else b.r = clamp(r, 2, 2000);
+}
+/** Editing a keyed property while playing would chase a moving playhead. */
+function pauseForKeys(blobs) {
+  if (state.playing && blobs.some((b) => hasKeys(b, 'pos') || hasKeys(b, 'r'))) {
+    setPlaying(false);
+    state.time = Math.min(snapTime(state.time), doc.loop);
+  }
+}
+function roundKeys(b) {
+  for (const k of b.keys.pos) { k.x = round2(k.x); k.y = round2(k.y); }
+  for (const k of b.keys.r) k.v = round2(k.v);
+}
+/** When the last key of a track goes, the property keeps the value it had. */
+function bakeStatic(b, track, o) {
+  if (track === 'pos') { b.x = round2(o.x); b.y = round2(o.y); } else b.r = round2(clamp(o.r, 2, 2000));
+}
 
 // ---------------------------------------------------------------- editing ops
 function defaultRadius() {
@@ -369,6 +448,7 @@ function deleteSelection() {
   if (!state.selection.size) return;
   doc.blobs = doc.blobs.filter((b) => !state.selection.has(b.id));
   state.selection.clear();
+  state.selectedKeys.clear();
   commit();
   notify();
   requestRender();
@@ -381,7 +461,11 @@ function duplicateSelection(offset = true) {
   const copies = sel.map((b) => {
     const c = JSON.parse(JSON.stringify(b));
     c.id = id++;
-    if (offset) { c.x = round2(c.x + b.r * 0.7); c.y = round2(c.y + b.r * 0.7); }
+    if (offset) {
+      const o = Math.max(b.r, ...b.keys.r.map((k) => k.v)) * 0.7;
+      c.x = round2(c.x + o); c.y = round2(c.y + o);
+      for (const k of c.keys.pos) { k.x = round2(k.x + o); k.y = round2(k.y + o); }
+    }
     return c;
   });
   doc.blobs.push(...copies);
@@ -398,7 +482,10 @@ function setBoardSize(w, h) {
   w = Math.round(clamp(w || doc.board.w, 64, 8192));
   h = Math.round(clamp(h || doc.board.h, 64, 8192));
   const dx = (w - doc.board.w) / 2, dy = (h - doc.board.h) / 2;
-  for (const b of doc.blobs) { b.x = round2(b.x + dx); b.y = round2(b.y + dy); }
+  for (const b of doc.blobs) {
+    b.x = round2(b.x + dx); b.y = round2(b.y + dy);
+    for (const k of b.keys.pos) { k.x = round2(k.x + dx); k.y = round2(k.y + dy); }
+  }
   doc.board = { w, h };
   commit();
   notify();
@@ -407,6 +494,7 @@ function setBoardSize(w, h) {
 function loadDoc(d, { fit = true, record = true } = {}) {
   doc = d;
   state.selection.clear();
+  state.selectedKeys.clear();
   state.time = 0;
   state.lastRadius = null;
   if (record) commit();
@@ -462,14 +550,25 @@ overlay.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
   dismissHint();
 
+  const kp = hitKeyPoint(pt.x, pt.y);
+  if (kp) {
+    if (e.shiftKey) state.selectedKeys.add(kp); else state.selectedKeys = new Set([kp]);
+    state.drag = { type: 'keypoint', key: kp, start: screenToBoard(pt.x, pt.y), orig: { x: kp.x, y: kp.y }, changed: false };
+    setCursor('grabbing');
+    notify();
+    requestRender();
+    return;
+  }
+
   const knob = hitKnob(pt.x, pt.y);
   if (knob) {
     const c = { x: knob.x, y: knob.y };
     const p = screenToBoard(pt.x, pt.y);
+    pauseForKeys(selectedBlobs());
     state.drag = {
       type: 'resize', c,
       startDist: Math.max(Math.hypot(p.x - c.x, p.y - c.y), 1e-3),
-      orig: new Map(selectedBlobs().map((b) => [b.id, b.r])),
+      orig: new Map(selectedBlobs().map((b) => [b.id, baseOf(b).r])),
       changed: false,
     };
     return;
@@ -486,9 +585,11 @@ overlay.addEventListener('pointerdown', (e) => {
     let dup = false;
     if (e.altKey) dup = duplicateSelection(false).length > 0;
     const start = screenToBoard(pt.x, pt.y);
+    pauseForKeys(selectedBlobs());
+    state.selectedKeys.clear();
     state.drag = {
       type: 'move', start,
-      orig: new Map(selectedBlobs().map((b) => [b.id, { x: b.x, y: b.y }])),
+      orig: new Map(selectedBlobs().map((b) => { const o = baseOf(b); return [b.id, { x: o.x, y: o.y }]; })),
       changed: dup,
     };
     setCursor('grabbing');
@@ -502,7 +603,7 @@ overlay.addEventListener('pointerdown', (e) => {
     type: 'marquee', ax: pt.x, ay: pt.y, bx: pt.x, by: pt.y,
     base: e.shiftKey ? new Set(state.selection) : new Set(),
   };
-  if (!e.shiftKey && state.selection.size) { state.selection.clear(); notify(); }
+  if (!e.shiftKey && (state.selection.size || state.selectedKeys.size)) { state.selection.clear(); state.selectedKeys.clear(); notify(); }
   requestRender();
 });
 
@@ -528,10 +629,11 @@ overlay.addEventListener('pointermove', (e) => {
 
   const d = state.drag;
   if (!d) {
-    const knob = hitKnob(pt.x, pt.y);
-    const id = knob ? null : hitBlob(pt.x, pt.y);
+    const kp = hitKeyPoint(pt.x, pt.y);
+    const knob = kp ? null : hitKnob(pt.x, pt.y);
+    const id = knob || kp ? null : hitBlob(pt.x, pt.y);
     if (id !== state.hover) { state.hover = id; requestRender(); }
-    setCursor(state.spaceDown ? 'grab' : knob ? 'nwse-resize' : id != null ? 'move' : 'default');
+    setCursor(state.spaceDown ? 'grab' : kp ? 'pointer' : knob ? 'nwse-resize' : id != null ? 'move' : 'default');
     return;
   }
   if (d.type === 'pan') {
@@ -545,8 +647,16 @@ overlay.addEventListener('pointermove', (e) => {
     if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
     for (const b of doc.blobs) {
       const o = d.orig.get(b.id);
-      if (o) { b.x = o.x + dx; b.y = o.y + dy; }
+      if (o) setBasePos(b, o.x + dx, o.y + dy);
     }
+    d.changed = true;
+    requestRender();
+  } else if (d.type === 'keypoint') {
+    const p = screenToBoard(pt.x, pt.y);
+    let dx = p.x - d.start.x, dy = p.y - d.start.y;
+    if (e.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
+    d.key.x = d.orig.x + dx;
+    d.key.y = d.orig.y + dy;
     d.changed = true;
     requestRender();
   } else if (d.type === 'resize') {
@@ -554,7 +664,7 @@ overlay.addEventListener('pointermove', (e) => {
     const f = Math.hypot(p.x - d.c.x, p.y - d.c.y) / d.startDist;
     for (const b of doc.blobs) {
       const r0 = d.orig.get(b.id);
-      if (r0 != null) b.r = clamp(r0 * f, 2, 2000);
+      if (r0 != null) setBaseR(b, r0 * f);
     }
     d.changed = true;
     notify();
@@ -564,7 +674,7 @@ overlay.addEventListener('pointermove', (e) => {
     const a = screenToBoard(Math.min(d.ax, d.bx), Math.min(d.ay, d.by));
     const b = screenToBoard(Math.max(d.ax, d.bx), Math.max(d.ay, d.by));
     const sel = new Set(d.base);
-    for (const bl of state.frame.blobs) {
+    for (const bl of state.frame.all) {
       // Select blobs whose circle touches the box.
       const cx = clamp(bl.x, a.x, b.x), cy = clamp(bl.y, a.y, b.y);
       if (Math.hypot(bl.x - cx, bl.y - cy) <= bl.r) sel.add(bl.id);
@@ -579,11 +689,11 @@ function endDrag(record = true) {
   const d = state.drag;
   state.drag = null;
   if (!d) return;
-  if ((d.type === 'move' || d.type === 'resize') && d.changed) {
-    for (const b of selectedBlobs()) { b.x = round2(b.x); b.y = round2(b.y); b.r = round2(b.r); }
+  if ((d.type === 'move' || d.type === 'resize' || d.type === 'keypoint') && d.changed) {
+    for (const b of selectedBlobs()) { b.x = round2(b.x); b.y = round2(b.y); b.r = round2(b.r); roundKeys(b); }
     if (d.type === 'resize') {
       const first = selectedBlobs()[0];
-      if (first) state.lastRadius = first.r;
+      if (first) state.lastRadius = Math.max(baseOf(first).r, 2);
     }
     if (record) commit();
     notify();
@@ -657,8 +767,18 @@ window.addEventListener('keydown', (e) => {
     if (!e.repeat) { state.spaceDown = true; state.spaceUsed = false; setCursor('grab'); }
     return;
   }
-  if (k === 'Delete' || k === 'Backspace') { e.preventDefault(); deleteSelection(); return; }
-  if (k === 'Escape') { if (typing) focused.blur(); state.selection.clear(); notify(); requestRender(); return; }
+  if (k === 'Delete' || k === 'Backspace') {
+    e.preventDefault();
+    if (state.selectedKeys.size) editor.deleteKeys(); else deleteSelection();
+    return;
+  }
+  if (k === 'Escape') {
+    if (typing) focused.blur();
+    if (state.selectedKeys.size) state.selectedKeys.clear(); else state.selection.clear();
+    notify(); requestRender(); return;
+  }
+  if (k === 'j' || k === 'J') { editor.jumpKey(-1); return; }
+  if (k === 'l' || k === 'L') { editor.jumpKey(1); return; }
   if (k === 'a' || k === 'A' || k === 'n' || k === 'N') { addBlobAtCenter(); return; }
   if (k === 'f' || k === 'F' || k === '0') { fitView(); return; }
   if (k === '+' || k === '=') { const s = stageSize(); zoomAt(s.w / 2, s.h / 2, 1.25); return; }
@@ -666,7 +786,8 @@ window.addEventListener('keydown', (e) => {
   if (k === 'k' || k === 'K') { setPlaying(!state.playing); return; }
   if ((k === '[' || k === ']') && state.selection.size) {
     const f = k === ']' ? 1.06 : 1 / 1.06;
-    for (const b of selectedBlobs()) b.r = round2(clamp(b.r * f, 2, 2000));
+    pauseForKeys(selectedBlobs());
+    for (const b of selectedBlobs()) { setBaseR(b, baseOf(b).r * f); roundKeys(b); b.r = round2(b.r); }
     commit(); notify(); requestRender();
     return;
   }
@@ -674,7 +795,11 @@ window.addEventListener('keydown', (e) => {
   if (arrows[k] && state.selection.size) {
     e.preventDefault();
     const step = e.shiftKey ? 10 : 1;
-    for (const b of selectedBlobs()) { b.x = round2(b.x + arrows[k][0] * step); b.y = round2(b.y + arrows[k][1] * step); }
+    pauseForKeys(selectedBlobs());
+    for (const b of selectedBlobs()) {
+      const o = baseOf(b);
+      setBasePos(b, round2(o.x + arrows[k][0] * step), round2(o.y + arrows[k][1] * step));
+    }
     commit(); requestRender();
   }
 });
@@ -742,7 +867,7 @@ const editor = {
 
   togglePlay() {
     setPlaying(!state.playing);
-    if (state.playing && !isAnimated(doc)) toast('Nothing moves yet. Pick a motion for a blob in the panel.');
+    if (state.playing && !isAnimated(doc)) toast('Nothing moves yet. Pick a motion for a blob, or add keyframes in the timeline.');
   },
   scrub(frac) {
     state.playing = false;
@@ -750,6 +875,115 @@ const editor = {
     requestRender();
     notify();
   },
+  /** Move the playhead to t seconds (snapped to the key grid) and pause. */
+  seek(t) {
+    state.playing = false;
+    state.time = clamp(snapTime(t), 0, doc.loop);
+    requestRender();
+    notify();
+  },
+  selectBlob(id, additive) {
+    if (additive) {
+      if (state.selection.has(id)) state.selection.delete(id); else state.selection.add(id);
+    } else state.selection = new Set([id]);
+    notify(); requestRender();
+  },
+
+  // Keyframes
+  keyStep: KEY_STEP,
+  /** Base (keyed or static) values of a blob at the playhead. */
+  baseValue: (b) => baseOf(b),
+  /** Stopwatch: start animating a property, or stop and keep its current value. */
+  toggleTrack(id, track) {
+    const b = blobById(id);
+    if (!b) return;
+    const o = baseOf(b);
+    if (hasKeys(b, track)) {
+      for (const k of b.keys[track]) state.selectedKeys.delete(k);
+      b.keys[track] = [];
+      bakeStatic(b, track, o);
+    } else {
+      pauseForKeys([b]);
+      if (track === 'pos') setKey(b.keys.pos, keyTime(), { x: round2(o.x), y: round2(o.y) });
+      else setKey(b.keys.r, keyTime(), { v: round2(o.r) });
+    }
+    commit(); edited();
+  },
+  /** Add a key holding the current value at the playhead, or remove the one there. */
+  toggleKey(id, track) {
+    const b = blobById(id);
+    if (!b) return;
+    const t = keyTime();
+    const existing = keyAt(b.keys[track], t);
+    const o = baseOf(b);
+    if (existing) {
+      b.keys[track] = b.keys[track].filter((k) => k !== existing);
+      state.selectedKeys.delete(existing);
+      if (!b.keys[track].length) bakeStatic(b, track, o);
+    } else {
+      pauseForKeys([b]);
+      const k = track === 'pos' ? setKey(b.keys.pos, t, { x: round2(o.x), y: round2(o.y) }) : setKey(b.keys.r, t, { v: round2(o.r) });
+      if (!k) toast('That property has the maximum number of keyframes.', { error: true });
+    }
+    commit(); edited();
+  },
+  /** Jump the playhead to the previous (-1) or next (+1) key of the given blobs, the selection or everything. */
+  jumpKey(dir, ids) {
+    const blobs = ids ? ids.map(blobById).filter(Boolean) : (state.selection.size ? selectedBlobs() : doc.blobs);
+    const now = state.time;
+    let best = null;
+    for (const b of blobs) for (const tr of TRACKS) for (const k of b.keys[tr]) {
+      if (dir > 0 ? k.t > now + KEY_EPS : k.t < now - KEY_EPS) {
+        if (best == null || (dir > 0 ? k.t < best : k.t > best)) best = k.t;
+      }
+    }
+    if (best != null) editor.seek(best);
+  },
+  selectKeys(keys, additive) {
+    if (!additive) state.selectedKeys = new Set(keys);
+    else for (const k of keys) { if (state.selectedKeys.has(k)) state.selectedKeys.delete(k); else state.selectedKeys.add(k); }
+    notify(); requestRender();
+  },
+  clearKeySelection() { if (state.selectedKeys.size) { state.selectedKeys.clear(); notify(); requestRender(); } },
+  /**
+   * Retime keys live while dragging: each goes to its original time + dt on
+   * the key grid, clamped to the timeline. A key never lands on another key
+   * of its own track.
+   */
+  retimeKeys(origTimes, dt) {
+    for (const [k, t0] of origTimes) k.t = clamp(snapTime(t0 + dt), 0, doc.loop);
+    for (const b of doc.blobs) for (const tr of TRACKS) {
+      const list = b.keys[tr];
+      if (!list.some((k) => origTimes.has(k))) continue;
+      sortTrack(list);
+      for (let i = 1; i < list.length; i++) {
+        if (list[i].t - list[i - 1].t < KEY_STEP / 2) {
+          const moved = origTimes.has(list[i]) ? list[i] : list[i - 1];
+          const other = moved === list[i] ? list[i - 1] : list[i];
+          moved.t = snapTime(other.t + (moved === list[i] ? KEY_STEP : -KEY_STEP));
+        }
+      }
+      sortTrack(list);
+    }
+    edited();
+  },
+  setKeyEase(on) {
+    for (const k of state.selectedKeys) k.ease = !!on;
+    commit(); edited();
+  },
+  deleteKeys() {
+    const del = state.selectedKeys;
+    if (!del.size) return;
+    for (const b of doc.blobs) for (const tr of TRACKS) {
+      if (!b.keys[tr].some((k) => del.has(k))) continue;
+      const o = baseOf(b);
+      b.keys[tr] = b.keys[tr].filter((k) => !del.has(k));
+      if (!b.keys[tr].length) bakeStatic(b, tr, o);
+    }
+    state.selectedKeys = new Set();
+    commit(); edited();
+  },
+  setCurve(on) { forSel((b) => { b.keys.curve = !!on; }); commit(); edited(); },
   addBlob: addBlobAtCenter,
   zoomBy(f) { const s = stageSize(); zoomAt(s.w / 2, s.h / 2, f); },
   fitView,
@@ -767,7 +1001,12 @@ const editor = {
   setNoOverlap(on) { doc.params.noOverlap = !!on; commit(); edited(); },
 
   // Selection
-  setRadius(v) { forSel((b) => { b.r = v; }); state.lastRadius = v; edited(); },
+  setRadius(v) {
+    pauseForKeys(selectedBlobs());
+    forSel((b) => setBaseR(b, v));
+    if (v >= 2) state.lastRadius = v;
+    edited();
+  },
   setMotion(key, v) { forSel((b) => { b.motion[key] = key === 'cycles' ? Math.round(v) : v; }); edited(); },
   setMotionType(id) {
     forSel((bl) => {
@@ -792,7 +1031,7 @@ const editor = {
   setBoardSize: (w, h) => setBoardSize(w, h),
   setBackground(c) { doc.background = c; edited(); },
   setTransparent(on) { doc.transparent = !!on; commit(); edited(); },
-  setLoop(v) { doc.loop = v; state.time = state.time % v; edited(); },
+  setLoop(v) { doc.loop = v; state.time = Math.min(state.time, v * 0.99999); edited(); },
 
   // File
   newDoc() {

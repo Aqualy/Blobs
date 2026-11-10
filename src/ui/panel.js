@@ -26,6 +26,7 @@ const MOTION_FIELDS = {
   pulse: { label: 'Pulse', min: 0, max: 0.6, step: 0.01, tip: 'Breathing: grows and shrinks the radius' },
 };
 
+const ROUTES = [{ value: 'curve', label: 'Curved' }, { value: 'straight', label: 'Straight' }];
 const DIRECTIONS = [{ value: 1, label: 'Clockwise' }, { value: -1, label: 'Counter' }];
 const MOTIONS = MOTION_TYPES.map((t) => ({ value: t.id, label: t.label }));
 
@@ -56,6 +57,8 @@ export class BlPanel extends LitElement {
     .dim span { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); font-size: 11px; color: var(--text-3); pointer-events: none; }
     .dim input { width: 100%; padding-left: 22px; }
     select.field { width: 100%; }
+    .note { display: flex; align-items: center; gap: 6px; margin: 0 0 2px; font-size: 11.5px; color: var(--text-3); }
+    .note svg { color: var(--lime); fill: var(--lime); }
 
     .empty { display: grid; justify-items: center; gap: 10px; padding: 10px 4px 4px; text-align: center; }
     .empty .glyph {
@@ -102,6 +105,7 @@ export class BlPanel extends LitElement {
         <kbd>Space + drag</kbd><span>Pan the canvas</span>
         <kbd>[ ]</kbd><span>Shrink or grow the selection</span>
         <kbd>Alt + drag</kbd><span>Duplicate while moving</span>
+        <kbd>J / L</kbd><span>Previous / next keyframe</span>
       </div>
     </div>`;
   }
@@ -109,6 +113,9 @@ export class BlPanel extends LitElement {
   blobBody(ed, b) {
     const m = b.motion;
     const moving = m.type !== 'none';
+    const keyedR = b.keys.r.length > 0;
+    const keyedPos = b.keys.pos.length > 0;
+    const radius = keyedR ? ed.baseValue(b).r : b.r;
     const motionSlider = (key) => {
       const f = MOTION_FIELDS[key];
       return html`<bl-slider label=${f.label} title=${f.tip} .value=${m[key]} min=${f.min} max=${f.max} step=${f.step}
@@ -116,8 +123,17 @@ export class BlPanel extends LitElement {
         @bl-input=${(e) => ed.setMotion(key, e.detail)} @bl-change=${() => ed.commit()}></bl-slider>`;
     };
     return html`<div class="stack">
-      <bl-slider label="Radius" .value=${b.r} min="4" max="600" step="1" num-max="2000"
+      <bl-slider label=${keyedR ? 'Radius ◆' : 'Radius'} .value=${radius} min=${keyedR ? 0 : 4} max="600" step="1" num-max="2000"
+        title=${keyedR ? 'Size is keyframed: changing it sets a key at the playhead' : ''}
         @bl-input=${(e) => ed.setRadius(e.detail)} @bl-change=${() => ed.commit()}></bl-slider>
+      ${keyedPos || keyedR ? html`<p class="note">${icon('diamond', 12)}
+        <span>${[keyedPos && 'Position', keyedR && 'size'].filter(Boolean).join(' and ')} keyframed. Edits set a key at the playhead.</span></p>` : nothing}
+      ${b.keys.pos.length > 2 ? html`<div class="row">
+        <span class="lbl">Route</span>
+        <bl-segmented label="Route" .options=${ROUTES} .value=${b.keys.curve !== false ? 'curve' : 'straight'}
+          title="How the path runs through the position keys"
+          @bl-change=${(e) => ed.setCurve(e.detail === 'curve')}></bl-segmented>
+      </div>` : nothing}
       <div class="row top">
         <span class="lbl">Colour</span>
         <bl-swatches label="Colour" .palette=${PALETTE} .value=${b.color}

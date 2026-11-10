@@ -38,6 +38,12 @@ export const MAX_BRIDGES_OFF = 12;
 
 export const LIMITS = Object.freeze({ maxBlobs: 128, maxPairs: 512 });
 
+/**
+ * Below this radius the bridges of a blob with keyframed size (blob.grow)
+ * fade in and out, so a blob growing from size 0 never switches a bridge on.
+ */
+export const GROW_R = 12;
+
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 const smoothstep = (a, b, x) => {
   const t = clamp((x - a) / (b - a), 0, 1);
@@ -94,6 +100,13 @@ export function computePairs(blobs, p) {
   }
 
   if (p.noOverlap && cands.length) suppressOverlaps(cands, blobs, n, p);
+  // A blob that is only just there (keyframed in from size 0) reaches out
+  // through the bridge's own lifecycle instead of switching a bridge on.
+  for (const c of cands) {
+    const fa = c.A.grow && c.A.r < GROW_R ? 1 - smoothstep(0.5, GROW_R, c.A.r) : 0;
+    const fb = c.B.grow && c.B.r < GROW_R ? 1 - smoothstep(0.5, GROW_R, c.B.r) : 0;
+    if (fa > 0 || fb > 0) c.sup = Math.max(c.sup, fa, fb);
+  }
   const cap = Math.round(p.maxBridges ?? MAX_BRIDGES_OFF);
   if (cap < MAX_BRIDGES_OFF && cands.length) limitBridges(cands, n, cap);
 
@@ -176,7 +189,9 @@ function buildPair(c, t, p) {
   // negative afterwards (the bridge is split in the middle).
   const wMid = t < snap
     ? minR * p.thickness * Math.pow(1 - t / snap, 2)
-    : -minR * 0.3 * pinch;
+    // A blob keyframed down to tiny sizes still has its split neck pushed
+    // out of sight (≥ 2.5, like kill below); static blobs keep their exact shape.
+    : -(A.grow || B.grow ? Math.max(minR * 0.3, 2.5) : minR * 0.3) * pinch;
   // Past the snap the remains are pushed strictly outside the surface,
   // so a bridge leaving reach has zero visible contribution.
   const kill = Math.max(minR * 0.06, 2.5) * pinch;

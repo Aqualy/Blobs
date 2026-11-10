@@ -24,10 +24,12 @@ npm test    # node --test "test/*.test.mjs"
 | `src/field.js` | **Single source of truth for the shape.** `computePairs()` builds bridges; `evalField`/`evalFieldWeights` evaluate the SDF on the CPU. Also holds `DEFAULT_PARAMS`, `PARAM_RANGES`, `LIMITS` (128 blobs / 512 pairs), and no-overlap suppression. |
 | `src/renderer.js` | WebGL2 fragment shader that **mirrors `bridgeDist` + smooth-min from field.js**. Pair data goes in through an RGBA32F texture (4 texels per row). Any change to the bridge SDF or colour blending must be made in **both** places. Tile culling: `_buildTiles` gives each screen tile its own item list (RG32UI header + R16UI list textures). `skipUnchanged` (editor only) leaves the canvas alone when a frame is identical to the last. |
 | `src/model.js` | Document schema, `normalizeDoc` (sanitizes all loaded/URL/localStorage input), motion (`resolveBlob`: drift/orbit/swing/pulse, all periodic in `doc.loop` for seamless video), presets (Triad = reference image, Lime orbit, Chain, Cluster, Pulse ring, Blank). |
-| `src/scene.js` | `frameAt(doc, time)`: resolves blobs and pairs for a moment in time. |
+| `src/keys.js` | Keyframes. Per blob `keys = { pos: [{t,x,y,ease}], r: [{t,v,ease}], curve }`. A track with keys overrides the static x/y or r (`baseAt`); procedural motion adds on top. Temporal easing is a cubic Hermite per segment (ease key = zero speed). The route is a centripetal Catmull–Rom spline. `normalizeKeys` sanitizes; key times sit on a 0.01 s grid in the editor. |
+| `src/scene.js` | `frameAt(doc, time)` returns `{ blobs, pairs, all }`. `blobs` is what gets drawn: size-0 blobs are left out, and blobs with keyframed size below `VANISH_R` sink via `drawnRadius`. `all` holds every blob at its true size in document order, for hit testing and the overlay. |
 | `src/contour.js` | Marching squares, RDP simplification, Catmull–Rom to SVG path. |
 | `src/export.js` | PNG (offscreen renderer), SVG (CPU field; multi-colour becomes crisp regions), video (MediaRecorder, one loop, real time), download helper. |
 | `src/app.js` | Editor core: pointer/touch/pinch, marquee, resize knob, keyboard, undo/redo (JSON snapshots), autosave (`localStorage` `blobs:doc:v1`), share links (`#d=` deflate-raw base64url). Exposes the `editor` API on `store.editor` and calls `notify()` after changes. `window.blobs` is a debug/automation handle; `window.blobs.stats()` gives last-frame timings. |
+| `src/ui/timeline.js` | `bl-timeline` (under the stage). It has blob rows, and selected blobs get Position and Size rows with a stopwatch, key navigator and key lanes; a ruler to scrub; an inspector for selected keys. The playhead and clock update through `subscribe('time')` by direct DOM writes, never Lit bindings (writing into a bound node breaks Lit). |
 | `src/ui/` | Lit components. `store.js` (editor handle, `notify('change'|'time')`, `StoreController`), `theme.js` (shared control styles; tokens live on `:root` in `styles.css`), `icons.js`, `controls.js` (`bl-slider`, `bl-swatches`, `bl-segmented`, `bl-switch`), `panel.js`, `topbar.js` (+ `bl-zoombar`), `dialogs.js` (`bl-export-dialog`, `bl-toasts`). Controls emit `bl-input` (live preview) and `bl-change` (record an undo step); never use native `input`, which is composed and leaks out of shadow roots. |
 
 ## How the bridges work (invariants: don't break)
@@ -37,6 +39,11 @@ npm test    # node --test "test/*.test.mjs"
 - Bend and neck offset come from `hash3(idA, idB)` with pairs ordered by id: stable over time and independent of list order.
 - Colours blend over `COLOR_BAND = 0.3 × k`, and the colour along a bridge switches near the neck. This avoids muddy junctions.
 - **The user's top requirement is smoothness: no flicker, pops, or sudden breaks.** Every quantity must be a continuous function of blob positions and sizes. Tests enforce this by sampling the field (clamped to the visible ±4 band) while blobs move in 0.25–0.5 unit steps.
+
+## Keyframes (invariants)
+
+- Editing a property whose track has keys (drag, knob, `[ ]`, arrows, Radius slider) writes a key at the playhead (`setBasePos`/`setBaseR`), pausing playback first. Without keys it edits the static value. Turning the stopwatch off, or deleting the last key, bakes the current value back into the static x/y/r.
+- Blobs that "appear" have keyframed size 0. Only blobs with keyframed size get `grow = true` in `frameAt`. For those, `computePairs` fades bridges through `suppressedT` below `GROW_R = 12`, the split neck is pushed ≥ 2.5 units outside, and `drawnRadius` sinks them below r = 2. Without this a growing blob pops (measured 8 units). Gating on `grow` keeps every non-keyframed composition bit-identical to before: 1,426 frames of old presets plus random scenes were compared.
 
 ## Performance invariants (output must stay identical)
 

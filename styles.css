@@ -56,10 +56,13 @@ body {
 bl-topbar { display: block; flex: none; z-index: 2; }
 
 .workspace { flex: 1; display: flex; min-height: 0; }
+.editor { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+bl-timeline { flex: none; }
 .stage {
   position: relative;
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
   background: var(--stage);
   touch-action: none;
@@ -98,6 +101,7 @@ bl-toasts { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%
 @media (max-width: 860px) {
   body { overflow: auto; }
   .workspace { flex-direction: column; }
+  .editor { flex: none; }
   .stage { flex: none; height: 62vh; min-height: 320px; }
   bl-panel { width: 100%; border-left: none; border-top: 1px solid var(--border); overflow: visible; }
   .hint { display: none; }

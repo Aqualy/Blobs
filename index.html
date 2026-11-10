@@ -14,13 +14,16 @@
   <bl-topbar></bl-topbar>
 
   <main class="workspace">
-    <section class="stage" id="stage" aria-label="Canvas">
-      <canvas id="gl"></canvas>
-      <canvas id="overlay"></canvas>
-      <bl-zoombar></bl-zoombar>
-      <div class="hint" id="hint">Double-click to add · drag to move · drag the knob to resize · Space-drag to pan</div>
-      <div class="fatal" id="fatal" hidden></div>
-    </section>
+    <div class="editor">
+      <section class="stage" id="stage" aria-label="Canvas">
+        <canvas id="gl"></canvas>
+        <canvas id="overlay"></canvas>
+        <bl-zoombar></bl-zoombar>
+        <div class="hint" id="hint">Double-click to add · drag to move · drag the knob to resize · Space-drag to pan</div>
+        <div class="fatal" id="fatal" hidden></div>
+      </section>
+      <bl-timeline aria-label="Timeline"></bl-timeline>
+    </div>
 
     <bl-panel aria-label="Properties"></bl-panel>
   </main>

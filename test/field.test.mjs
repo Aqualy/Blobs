@@ -104,6 +104,8 @@ test('every motion loops seamlessly', () => {
     for (const b of doc.blobs) {
       const a = resolveBlob(b, 0, doc.loop, {});
       const z = resolveBlob(b, doc.loop, doc.loop, {});
+      // A blob of size 0 is not there, wherever it is.
+      if (a.r <= 0 && z.r <= 0) continue;
       assert.ok(Math.abs(a.x - z.x) < 1e-6 && Math.abs(a.y - z.y) < 1e-6 && Math.abs(a.r - z.r) < 1e-6, preset.name);
     }
   }

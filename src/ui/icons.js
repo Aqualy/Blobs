@@ -25,6 +25,12 @@ const P = {
   pointer: svg`<path d="m5 4 13.5 5.5-5.8 1.7-1.7 5.8z"/><path d="m13 13 5.5 5.5"/>`,
   sparkle: svg`<path d="M12 3.5 13.8 9a2 2 0 0 0 1.2 1.2l5.5 1.8-5.5 1.8a2 2 0 0 0-1.2 1.2L12 20.5 10.2 15a2 2 0 0 0-1.2-1.2L3.5 12 9 10.2a2 2 0 0 0 1.2-1.2z"/>`,
   check: svg`<path d="m5 12.5 4.5 4.5L19 7.5"/>`,
+  stopwatch: svg`<circle cx="12" cy="13.5" r="7"/><path d="M12 13.5V10M10 3.5h4M18 7.5l1.2-1.2"/>`,
+  diamond: svg`<path d="M12 4.5 19.5 12 12 19.5 4.5 12z"/>`,
+  chevL: svg`<path d="m14.5 6-6 6 6 6"/>`,
+  chevR: svg`<path d="m9.5 6 6 6-6 6"/>`,
+  chevD: svg`<path d="m6 9.5 6 6 6-6"/>`,
+  timeline: svg`<path d="M4 6.5h16M4 12h16M4 17.5h16"/><path d="M9 4v16" stroke-width="2.2"/>`,
 };
 
 /** @param {keyof typeof P} name */

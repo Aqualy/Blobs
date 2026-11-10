@@ -37,3 +37,9 @@ export class StoreController {
 export function emit(el, name, detail) {
   el.dispatchEvent(new CustomEvent(name, { detail, bubbles: true }));
 }
+
+/** Call fn on a store event. Returns the unsubscribe function. */
+export function subscribe(kind, fn) {
+  bus.addEventListener(kind, fn);
+  return () => bus.removeEventListener(kind, fn);
+}

@@ -1,5 +1,6 @@
 // Document model: schema, validation, motion and presets.
 import { DEFAULT_PARAMS, PARAM_RANGES, LIMITS, hash3 } from './field.js';
+import { emptyKeys, normalizeKeys, baseAt, isKeyed } from './keys.js';
 
 export const PALETTE = ['#c5d92f', '#dddddd', '#111111', '#ffffff', '#8a9a1f', '#6b6b6b'];
 
@@ -26,8 +27,8 @@ export function defaultMotion() {
   return { type: 'none', amp: 60, cycles: 1, phase: 0, angle: 0, pulse: 0 };
 }
 
-export function makeBlob(id, x, y, r, color = PALETTE[0], motion) {
-  return { id, x, y, r, color, motion: { ...defaultMotion(), ...(motion || {}) } };
+export function makeBlob(id, x, y, r, color = PALETTE[0], motion, keys) {
+  return { id, x, y, r, color, motion: { ...defaultMotion(), ...(motion || {}) }, keys: { ...emptyKeys(), ...(keys || {}) } };
 }
 
 export function emptyDoc() {
@@ -84,6 +85,11 @@ export function normalizeDoc(raw) {
         angle: clamp(num(m.angle, 0), -360, 360),
         pulse: clamp(num(m.pulse, 0), 0, 0.6),
       },
+      keys: normalizeKeys(b.keys, {
+        maxTime: 60,
+        minX: -doc.board.w, maxX: doc.board.w * 2,
+        minY: -doc.board.h, maxY: doc.board.h * 2,
+      }),
     });
     if (id) seen.add(id);
   }
@@ -108,7 +114,8 @@ export function resolveBlob(b, time, loop, out) {
   const m = b.motion;
   const ph = (time / loop) * m.cycles + m.phase;
   const a = ph * TAU;
-  let x = b.x, y = b.y;
+  baseAt(b, time, out);
+  let x = out.x, y = out.y;
   switch (m.type) {
     case 'drift': {
       // Two incommensurate-looking but loop-periodic harmonics per axis.
@@ -133,17 +140,26 @@ export function resolveBlob(b, time, loop, out) {
     }
     default: break;
   }
-  let r = b.r;
+  let r = out.r;
   if (m.pulse > 0) r *= 1 + m.pulse * Math.sin(a + 1.3);
   out.id = b.id; out.x = x; out.y = y; out.r = r;
   return out;
 }
 
-export const isAnimated = (doc) => doc.blobs.some((b) => b.motion.type !== 'none' || b.motion.pulse > 0);
+export const isAnimated = (doc) => doc.blobs.some((b) => b.motion.type !== 'none' || b.motion.pulse > 0 || isKeyed(b));
 
 // ---------- presets ----------
 
 function preset(name, build) { return { name, build }; }
+
+/** Keyframes from compact lists: pos [[t, x, y], …] and r [[t, v], …]. */
+function keyed(pos, r) {
+  return {
+    pos: pos.map(([t, x, y]) => ({ t, x, y, ease: true })),
+    r: r.map(([t, v]) => ({ t, v, ease: true })),
+    curve: true,
+  };
+}
 
 export const PRESETS = [
   preset('Triad', () => {
@@ -200,6 +216,29 @@ export const PRESETS = [
       d.blobs.push(makeBlob(i + 1, 540 + Math.cos(a) * 300, 540 + Math.sin(a) * 300, 64,
         i % 2 ? '#dddddd' : '#c5d92f', { pulse: 0.35, cycles: 1, phase: i / 8 }));
     }
+    return d;
+  }),
+  preset('Appear (keyframes)', () => {
+    // Three orbs grow out of nothing, each along its own route, settle into a
+    // triad, then gather in the middle and vanish so the loop is seamless.
+    const d = emptyDoc();
+    d.background = '#1a1a1a';
+    d.loop = 8;
+    const L = '#c5d92f', G = '#dddddd';
+    d.blobs = [
+      makeBlob(1, 420, 440, 110, L, null, keyed(
+        [[0, 120, 160], [1.6, 260, 420], [3, 380, 300], [4.5, 420, 440], [6.5, 420, 440], [7.9, 520, 520]],
+        [[0, 0], [1.2, 70], [3, 140], [4.5, 110], [6.5, 110], [7.9, 0]],
+      )),
+      makeBlob(2, 680, 470, 90, G, null, keyed(
+        [[0.6, 980, 250], [2, 820, 180], [3.4, 900, 520], [4.8, 680, 470], [6.6, 680, 470], [7.9, 560, 520]],
+        [[0.6, 0], [1.8, 60], [3.4, 110], [4.8, 90], [6.6, 90], [7.9, 0]],
+      )),
+      makeBlob(3, 540, 690, 100, L, null, keyed(
+        [[1.2, 540, 1000], [2.6, 300, 840], [4, 720, 820], [5.2, 540, 690], [6.8, 540, 690], [7.9, 540, 560]],
+        [[1.2, 0], [2.6, 90], [4, 70], [5.2, 100], [6.8, 100], [7.9, 0]],
+      )),
+    ];
     return d;
   }),
   preset('Blank', () => emptyDoc()),

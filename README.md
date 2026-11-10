@@ -9,6 +9,7 @@ Plain HTML/CSS/JS with no build step. The interface is built with [Lit](https://
 - **Organic bridges.** Every pair of blobs within reach is joined by a tapered, slightly bent neck, and a cubic smooth-min fillets it into both blobs. Bridge width, the pinch, and the retraction are all continuous functions of distance and size, so bridges never flicker, pop, or break suddenly. The test suite checks this.
 - **GPU rendering.** A WebGL2 signed-distance-field shader handles up to 128 blobs and 512 bridges, with anti-aliasing taken from the field's real screen-space gradient. The screen is split into tiles and each tile only visits the blobs and bridges that can affect it, so large compositions stay fast.
 - **Dynamic compositions.** Each blob can drift, orbit, swing, and pulse. All motion repeats exactly over the loop length, so recorded videos loop seamlessly.
+- **Keyframe animation.** A timeline under the canvas works like After Effects. Click a property's stopwatch (Position or Size) to animate it; after that, moving or resizing the blob sets a key at the playhead. Routes run as smooth curves through the position keys (or as straight lines), and each key is linear or eased. Keyframe the size to 0 to make a blob appear or vanish: its bridges reach out and retract smoothly instead of popping. Keyframes and the procedural motions combine. The **Appear (keyframes)** preset shows three orbs growing in along their own routes.
 - **Colour blending.** Blobs of different colours blend cleanly through their bridges. The palette includes `#c5d92f` and `#dddddd`.
 - **Bridge controls.** Sliders set reach, snap point, thickness, flare, taper, smoothness, and organic variation.
 - **No overlap switch.** When it is on, bridges that cross are removed (both of them, unless one is clearly stronger), and a bridge that brushes against another bridge or runs through a third blob gives way. Bridges meeting at a shared blob are left alone, so the rest of the composition stays exactly as it was. Removed bridges thin out and pinch off; they never pop.
@@ -35,6 +36,9 @@ Plain HTML/CSS/JS with no build step. The interface is built with [Lit](https://
 | Pan | Hold `Space` and drag, or drag with the middle or right mouse button, or two-finger scroll |
 | Zoom | Mouse wheel or pinch, or `+` / `-`; `F` fits the canvas to the screen |
 | Save JSON | `Ctrl+S` |
+| Animate a property | Select a blob, click the stopwatch next to Position or Size in the timeline, move the playhead, then edit the blob |
+| Keyframes | Click to select (`Shift` adds), drag to retime (snaps to the playhead; `Shift` = free), double-click to switch Linear/Ease, `Delete` removes. Drag the square route points on the canvas to reshape the path |
+| Previous / next key | `J` / `L`, or the arrows beside each property |
 
 ## Running locally
 
