@@ -1,6 +1,12 @@
 // WebGL2 renderer: evaluates the same field as field.js per pixel.
 import { LIMITS, blobK, COLOR_BAND } from './field.js';
 
+// Data texture: one row per blob (rows 0…maxBlobs-1) and per bridge after
+// that, COLS RGBA32F texels per row. Blob rows use texels 0–1; bridge rows
+// use all five (texel 4 = Bézier handle offsets c0, c1).
+const COLS = 5;
+const ROW = COLS * 4;
+
 // Width of the tile-list texture (a power of two: the shader uses shifts).
 const LIST_W = 2048;
 
@@ -84,6 +90,7 @@ void main() {
     vec4 t0 = fetch(row, 0);   // x0 y0 x1 y1
     vec4 t1 = fetch(row, 1);   // w0 w1 wMid neck
     vec4 t2 = fetch(row, 2);   // bend k taper ia
+    vec4 t4 = fetch(row, 4);   // c0 c1 (bridge handles) - -
     vec2 ba = t0.zw - t0.xy;
     float L = max(length(ba), 1e-4);
     vec2 u = ba / L;
@@ -92,11 +99,20 @@ void main() {
     float y = -r.x * u.y + r.y * u.x;
     float tx = clamp(x / L, 0.0, 1.0);
     y -= t2.x * L * 4.0 * tx * (1.0 - tx);
+    bool handles = t4.x != 0.0 || t4.y != 0.0;
+    if (handles) {
+      // Mirrors handleOffset / handleSlope in field.js.
+      float s = 1.0 - tx;
+      y -= 3.0 * s * tx * (s * t4.x + tx * t4.y) * L;
+      float sl = 3.0 * (s * (s - 2.0 * tx) * t4.x + tx * (2.0 * s - tx) * t4.y);
+      y /= sqrt(1.0 + sl * sl);
+    }
     float m = t1.w;
     float uu = tx < m ? (m - tx) / m : (tx - m) / (1.0 - m);
     float wEnd = tx < m ? t1.x : t1.y;
     float rad = t1.z + (wEnd - t1.z) * pow(uu, t2.z);
     float bd = length(vec2(x - tx * L, y)) - rad;
+    if (handles) bd = max(bd, length(p - t3.xy) - t3.z); // as in bridgeDist
     float w;
     d = sminw(d, bd, k, w);
     vec3 ca = fetch(int(t2.w), 1).rgb;
@@ -207,9 +223,9 @@ export class Renderer {
     this.vao = vao;
 
     this.rows = LIMITS.maxBlobs + LIMITS.maxPairs;
-    this.data = new Float32Array(this.rows * 4 * 4);
+    this.data = new Float32Array(this.rows * ROW);
     this.tex = this._texture();
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 4, this.rows, 0, gl.RGBA, gl.FLOAT, this.data);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, COLS, this.rows, 0, gl.RGBA, gl.FLOAT, this.data);
 
     this.tileTex = this._texture();
     this.tileDims = [0, 0];
@@ -252,7 +268,7 @@ export class Renderer {
     const D = this.data;
     const s = view.scale, ox = view.ox, oy = view.oy;
     const pad = 1 / s; // one device pixel of slack around each tile
-    const base = LIMITS.maxBlobs * 16;
+    const base = LIMITS.maxBlobs * ROW;
     if (this.header.length < cols * rows * 2) this.header = new Uint32Array(cols * rows * 2);
     const header = this.header;
     const cap = LIST_W * this.maxListRows;
@@ -278,7 +294,7 @@ export class Renderer {
         }
         let ub = Infinity, kb = 0;
         for (let i = 0; i < nb; i++) {
-          const o = i * 16;
+          const o = i * ROW;
           const bx = D[o], by = D[o + 1], r = D[o + 2], k = D[o + 3];
           const ex = bx < x0 ? x0 - bx : bx > x1 ? bx - x1 : 0;
           const ey = by < y0 ? y0 - by : by > y1 ? by - y1 : 0;
@@ -291,7 +307,7 @@ export class Renderer {
         }
         let kp = 0;
         for (let j = 0; j < np; j++) {
-          const o = base + j * 16;
+          const o = base + j * ROW;
           const cx = D[o + 12], cy = D[o + 13], bound = D[o + 14], k = D[o + 9];
           const ex = cx < x0 ? x0 - cx : cx > x1 ? cx - x1 : 0;
           const ey = cy < y0 ? y0 - cy : cy > y1 ? cy - y1 : 0;
@@ -346,18 +362,19 @@ export class Renderer {
 
     for (let i = 0; i < nb; i++) {
       const b = blobs[i];
-      const o = i * 16;
+      const o = i * ROW;
       D[o] = b.x; D[o + 1] = b.y; D[o + 2] = b.r; D[o + 3] = blobK(b.r, params);
       D[o + 4] = b.rgb[0]; D[o + 5] = b.rgb[1]; D[o + 6] = b.rgb[2]; D[o + 7] = 1;
     }
-    const base = LIMITS.maxBlobs * 16;
+    const base = LIMITS.maxBlobs * ROW;
     for (let j = 0; j < np; j++) {
       const p = pairs[j];
-      const o = base + j * 16;
+      const o = base + j * ROW;
       D[o] = p.x0; D[o + 1] = p.y0; D[o + 2] = p.x1; D[o + 3] = p.y1;
       D[o + 4] = p.w0; D[o + 5] = p.w1; D[o + 6] = p.wMid; D[o + 7] = p.neck;
       D[o + 8] = p.bend; D[o + 9] = p.k; D[o + 10] = p.taper; D[o + 11] = p.ia;
       D[o + 12] = p.cx; D[o + 13] = p.cy; D[o + 14] = p.bound; D[o + 15] = p.ib;
+      D[o + 16] = p.c0 || 0; D[o + 17] = p.c1 || 0;
     }
 
     const W = this.canvas.width, H = this.canvas.height;
@@ -372,8 +389,8 @@ export class Renderer {
     }
 
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    if (nb > 0) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 4, nb, gl.RGBA, gl.FLOAT, D, 0);
-    if (np > 0) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, LIMITS.maxBlobs, 4, np, gl.RGBA, gl.FLOAT, D, base);
+    if (nb > 0) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, COLS, nb, gl.RGBA, gl.FLOAT, D, 0);
+    if (np > 0) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, LIMITS.maxBlobs, COLS, np, gl.RGBA, gl.FLOAT, D, base);
 
     const t0 = performance.now();
     const len = this.tiling ? this._buildTiles(nb, np, view, board, W, H, clip) : -1;
@@ -425,9 +442,9 @@ function tol(a, b, k) {
 function sameFrame(last, sig, D, nb, np) {
   if (last.sig.length !== sig.length) return false;
   for (let i = 0; i < sig.length; i++) if (last.sig[i] !== sig[i]) return false;
-  const base = LIMITS.maxBlobs * 16;
-  for (let i = 0, n = nb * 16; i < n; i++) if (last.data[i] !== D[i]) return false;
-  for (let i = base, n = base + np * 16; i < n; i++) if (last.data[i] !== D[i]) return false;
+  const base = LIMITS.maxBlobs * ROW;
+  for (let i = 0, n = nb * ROW; i < n; i++) if (last.data[i] !== D[i]) return false;
+  for (let i = base, n = base + np * ROW; i < n; i++) if (last.data[i] !== D[i]) return false;
   return true;
 }
 

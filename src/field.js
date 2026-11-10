@@ -62,12 +62,31 @@ export function hash3(a, b, c) {
 /** Fillet size used when merging a blob into the union. */
 export const blobK = (r, p) => Math.max(p.smooth * r * 0.5, 1e-3);
 
+/** Key of a pair in the overrides map: lower id first. */
+export const pairKey = (a, b) => (a < b ? `${a}-${b}` : `${b}-${a}`);
+
+/**
+ * Per-bridge edits made with the bridge handles (doc.bridges). The curve is
+ * a cubic Bézier along the bridge: control points at 1/3 and 2/3 of its
+ * length, offset sideways by (4/3·bend + c0)·L and (4/3·bend + c1)·L, where
+ * L is the segment length and the side is the left of the lower-id → higher-id
+ * direction. All fields are optional; a missing override changes nothing.
+ * @typedef {{ c0?: number, c1?: number, neck?: number|null, thick?: number, flare?: number, off?: boolean }} BridgeEdit
+ */
+export const BRIDGE_RANGES = Object.freeze({
+  c: [-1.2, 1.2],      // handle offsets, × segment length
+  neck: [0.12, 0.88],  // neck position along the bridge
+  thick: [0.1, 4],     // × neck thickness
+  flare: [0.2, 2.5],   // × flare
+});
+
 /**
  * Build the list of active bridges.
  * @param {{x:number,y:number,r:number,id:number}[]} blobs resolved (animated) blobs
  * @param {typeof DEFAULT_PARAMS} p
+ * @param {Map<string, BridgeEdit>} [edits] per-bridge edits by pairKey
  */
-export function computePairs(blobs, p) {
+export function computePairs(blobs, p, edits) {
   const cands = [];
   const n = Math.min(blobs.length, LIMITS.maxBlobs);
   for (let i = 0; i < n; i++) {
@@ -89,8 +108,9 @@ export function computePairs(blobs, p) {
       // Nested circles: the bridge would be buried anyway.
       if (d + Math.min(A.r, B.r) < Math.max(A.r, B.r) * 0.98) continue;
 
+      const ed = edits && edits.size ? edits.get(`${A.id}-${B.id}`) : undefined;
       cands.push({
-        A, B, ia: swap ? j : i, ib: swap ? i : j, d, gap,
+        A, B, ia: swap ? j : i, ib: swap ? i : j, d, gap, ed,
         ux: dx / d, uy: dy / d,
         t: Math.max(gap, 0) / reachDist,
         g: gap / reachDist,
@@ -106,6 +126,8 @@ export function computePairs(blobs, p) {
     const fa = c.A.grow && c.A.r < GROW_R ? 1 - smoothstep(0.5, GROW_R, c.A.r) : 0;
     const fb = c.B.grow && c.B.r < GROW_R ? 1 - smoothstep(0.5, GROW_R, c.B.r) : 0;
     if (fa > 0 || fb > 0) c.sup = Math.max(c.sup, fa, fb);
+    // A bridge switched off by hand is fully given up (it frees its slot below).
+    if (c.ed && c.ed.off) c.sup = 1;
   }
   const cap = Math.round(p.maxBridges ?? MAX_BRIDGES_OFF);
   if (cap < MAX_BRIDGES_OFF && cands.length) limitBridges(cands, n, cap);
@@ -180,6 +202,11 @@ function suppressedT(t, sup, snap) {
 /** Bridge geometry for a candidate at normalized gap t (0 = touching, 1 = gone). */
 function buildPair(c, t, p) {
   const { A, B, d, gap, ux, uy } = c;
+  const ed = c.ed;
+  const thick = ed && ed.thick != null ? ed.thick : 1;
+  const flare = ed && ed.flare != null ? ed.flare : 1;
+  const c0 = ed && ed.c0 ? ed.c0 : 0;
+  const c1 = ed && ed.c1 ? ed.c1 : 0;
   const snap = clamp(p.snap, 0.2, 0.97);
   const minR = Math.min(A.r, B.r);
   const pinch = smoothstep(snap, 1, t); // 0 until the neck snaps, 1 at reach
@@ -188,15 +215,15 @@ function buildPair(c, t, p) {
   // Neck half-width: thick when touching, hairline at the snap point,
   // negative afterwards (the bridge is split in the middle).
   const wMid = t < snap
-    ? minR * p.thickness * Math.pow(1 - t / snap, 2)
+    ? minR * p.thickness * thick * Math.pow(1 - t / snap, 2)
     // A blob keyframed down to tiny sizes still has its split neck pushed
     // out of sight (≥ 2.5, like kill below); static blobs keep their exact shape.
     : -(A.grow || B.grow ? Math.max(minR * 0.3, 2.5) : minR * 0.3) * pinch;
   // Past the snap the remains are pushed strictly outside the surface,
   // so a bridge leaving reach has zero visible contribution.
   const kill = Math.max(minR * 0.06, 2.5) * pinch;
-  const w0 = A.r * p.flare * life - kill;
-  const w1 = B.r * p.flare * life - kill;
+  const w0 = A.r * p.flare * flare * life - kill;
+  const w1 = B.r * p.flare * flare * life - kill;
 
   // Segment endpoints, inset into each circle so the flare grows out of it.
   let s0, s1;
@@ -208,11 +235,15 @@ function buildPair(c, t, p) {
   const x1 = A.x + ux * s1, y1 = A.y + uy * s1;
 
   const bend = p.organic * 0.16 * hash3(A.id, B.id, 1);
-  const neck = 0.5 + p.organic * 0.16 * hash3(A.id, B.id, 2);
+  const neck = ed && ed.neck != null ? ed.neck : 0.5 + p.organic * 0.16 * hash3(A.id, B.id, 2);
   const k = Math.max(p.smooth * minR * (0.35 + 0.65 * life), 1e-3) * (1 - pinch * 0.999);
 
   const L = s1 - s0;
-  const bound = L * 0.5 + Math.abs(bend) * L + Math.max(w0, w1, wMid, 0) + 1;
+  // Handles: the sideways offset is at most 4/9·(|c0| + |c1|)·L, and the
+  // slope correction in bridgeDist widens the bridge by at most hs.
+  const ch = Math.abs(c0) + Math.abs(c1);
+  const hs = ch ? Math.sqrt(1 + 9 * ch * ch) : 1;
+  const bound = L * 0.5 + Math.abs(bend) * L + ch * 0.45 * L + Math.max(w0, w1, wMid, 0) * hs + 1;
 
   // Approaching the snap, the profile turns from a long thread into a
   // localized pinch, so a breaking bridge never lingers as a hairline.
@@ -220,8 +251,8 @@ function buildPair(c, t, p) {
 
   const Ls = Math.max(L, 1e-4);
   return {
-    ia: c.ia, ib: c.ib,
-    x0, y0, x1, y1, w0, w1, wMid, neck, bend, k, taper,
+    ia: c.ia, ib: c.ib, a: A.id, b: B.id,
+    x0, y0, x1, y1, w0, w1, wMid, neck, bend, k, taper, c0, c1,
     cx: (x0 + x1) * 0.5, cy: (y0 + y1) * 0.5, bound,
     // Span of the segment that lies outside both blobs (for clearance tests).
     ta: Math.min((A.r * 0.32) / Ls, 0.5),
@@ -247,7 +278,7 @@ function sampleBridge(br) {
   const ux = bx / L, uy = by / L;
   for (let s = 0; s < SAMPLES; s++) {
     const tx = br.ta + (br.tb - br.ta) * (s / (SAMPLES - 1));
-    const off = br.bend * L * 4 * tx * (1 - tx);
+    const off = br.bend * L * 4 * tx * (1 - tx) + handleOffset(br.c0, br.c1, tx) * L;
     out[s * 3] = br.x0 + ux * tx * L - uy * off;
     out[s * 3 + 1] = br.y0 + uy * tx * L + ux * off;
     out[s * 3 + 2] = Math.max(profileAt(br, tx), 0);
@@ -495,7 +526,23 @@ function suppressOverlaps(cands, blobs, n, p) {
   for (let a = 0; a < m; a++) live[a].sup = sup[a];
 }
 
-/** Signed distance estimate from (px,py) to a bridge. Writes t-along into out[1]. */
+/** Sideways offset of the handle part of the centre-line, × L (cubic Bézier, ends fixed). */
+export function handleOffset(c0, c1, tx) {
+  if (!c0 && !c1) return 0;
+  const s = 1 - tx;
+  return 3 * s * tx * (s * c0 + tx * c1);
+}
+
+/** Slope of handleOffset with respect to tx. */
+function handleSlope(c0, c1, tx) {
+  const s = 1 - tx;
+  return 3 * (s * (s - 2 * tx) * c0 + tx * (2 * s - tx) * c1);
+}
+
+/**
+ * Signed distance estimate from (px,py) to a bridge. Writes t-along into out[1].
+ * MIRRORED in the fragment shader (renderer.js): keep both in step.
+ */
 export function bridgeDist(px, py, br, out) {
   const bx = br.x1 - br.x0;
   const by = br.y1 - br.y0;
@@ -506,6 +553,13 @@ export function bridgeDist(px, py, br, out) {
   let y = -rx * uy + ry * ux;
   const tx = clamp(x / L, 0, 1);
   y -= br.bend * L * 4 * tx * (1 - tx);
+  if (br.c0 || br.c1) {
+    // Handle curve: offset, then measure across the curve rather than
+    // straight up, so steep stretches keep their thickness.
+    y -= handleOffset(br.c0, br.c1, tx) * L;
+    const sl = handleSlope(br.c0, br.c1, tx);
+    y /= Math.sqrt(1 + sl * sl);
+  }
   const m = br.neck;
   let u, wEnd;
   if (tx < m) { u = (m - tx) / m; wEnd = br.w0; }
@@ -513,6 +567,9 @@ export function bridgeDist(px, py, br, out) {
   const r = br.wMid + (wEnd - br.wMid) * Math.pow(u, br.taper);
   const q = Math.hypot(x - tx * L, y);
   if (out) out[1] = tx;
+  // The slope correction under-estimates distance far from a curved bridge;
+  // the bounding circle keeps the estimate a valid bound there (exact culling).
+  if (br.c0 || br.c1) return Math.max(q - r, Math.hypot(px - br.cx, py - br.cy) - br.bound);
   return q - r;
 }
 

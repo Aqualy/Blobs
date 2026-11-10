@@ -3,7 +3,7 @@ import { LitElement, html, css, nothing } from './lit.js';
 import { base } from './theme.js';
 import { icon } from './icons.js';
 import { store, StoreController } from './store.js';
-import { PARAM_RANGES } from '../field.js';
+import { PARAM_RANGES, BRIDGE_RANGES } from '../field.js';
 import { PALETTE, BOARD_PRESETS, MOTION_TYPES } from '../model.js';
 import './controls.js';
 
@@ -81,7 +81,8 @@ export class BlPanel extends LitElement {
   render() {
     const ed = store.editor;
     if (!ed?.doc) return nothing;
-    return html`${this.blobSection(ed)}${this.bridgeSection(ed)}${this.canvasSection(ed)}${this.fileSection(ed)}`;
+    const first = ed.state.bridge ? this.oneBridgeSection(ed) : this.blobSection(ed);
+    return html`${first}${this.bridgeSection(ed)}${this.canvasSection(ed)}${this.fileSection(ed)}`;
   }
 
   blobSection(ed) {
@@ -106,6 +107,7 @@ export class BlPanel extends LitElement {
         <kbd>[ ]</kbd><span>Shrink or grow the selection</span>
         <kbd>Alt + drag</kbd><span>Duplicate while moving</span>
         <kbd>J / L</kbd><span>Previous / next keyframe</span>
+        <kbd>Click a bridge</kbd><span>Curve, thicken or hide it</span>
       </div>
     </div>`;
   }
@@ -165,6 +167,38 @@ export class BlPanel extends LitElement {
     </div>`;
   }
 
+  oneBridgeSection(ed) {
+    const sb = ed.selectedBridge();
+    const e = sb.edit;
+    const R = BRIDGE_RANGES;
+    const slider = (key, label, tip, value, [min, max], step) => html`<bl-slider label=${label} title=${tip}
+      .value=${value} min=${min} max=${max} step=${step}
+      @bl-input=${(ev) => ed.setBridge(key, ev.detail)} @bl-change=${() => ed.commitBridge()}></bl-slider>`;
+    const neck = e.neck ?? sb.pair?.neck ?? 0.5;
+    return html`<section aria-label="Bridge">
+      <header>
+        <h2>Bridge</h2>
+        <span class="badge on">Blob ${sb.a} ↔ Blob ${sb.b}</span>
+      </header>
+      ${!sb.pair && !e.off ? html`<p class="note">These blobs are not connected at this moment. Edits apply whenever they are.</p>` : nothing}
+      <p class="note">${icon('diamond', 12)}<span>Drag the round handles to curve the bridge and the diamond to move its neck.</span></p>
+      <div class="stack">
+        ${slider('thick', 'Thickness', 'Neck thickness of this bridge, × the global setting', e.thick, R.thick, 0.01)}
+        ${slider('flare', 'Flare', 'Width where it grows out of the blobs, × the global setting', e.flare, R.flare, 0.01)}
+        ${slider('neck', 'Neck', 'Where along the bridge it is thinnest (0 = at Blob ' + sb.a + ')', neck, R.neck, 0.01)}
+        ${slider('c0', 'Curve A', 'Sideways pull of the handle near Blob ' + sb.a, e.c0, R.c, 0.01)}
+        ${slider('c1', 'Curve B', 'Sideways pull of the handle near Blob ' + sb.b, e.c1, R.c, 0.01)}
+        <bl-switch class="sub" label="Show bridge" description=${e.off ? 'Hidden: the blobs stay apart' : 'Delete hides it'}
+          .checked=${!e.off} @bl-change=${(ev) => ed.setBridgeOff(!ev.detail)}></bl-switch>
+      </div>
+      <div class="actions">
+        <button class="btn" title="Make the bridge run dead straight" ?disabled=${!sb.pair} @click=${() => ed.straightenBridge()}>${icon('minus', 15)}Straighten</button>
+        <button class="btn" title="Back to the automatic shape" @click=${() => ed.resetBridge()}>${icon('reset', 15)}Reset</button>
+        <button class="btn" title="Back to blob editing (Esc)" @click=${() => ed.deselectBridge()}>${icon('x', 15)}Done</button>
+      </div>
+    </section>`;
+  }
+
   bridgeSection(ed) {
     const p = ed.doc.params;
     return html`<section aria-label="Bridges">
@@ -181,6 +215,10 @@ export class BlPanel extends LitElement {
         <bl-switch class="sub" label="No overlap" description="Bridges never cross or merge into each other"
           title="When on, a bridge that would cross or merge into another pinches off and retracts"
           .checked=${!!p.noOverlap} @bl-change=${(e) => ed.setNoOverlap(e.detail)}></bl-switch>
+        <p class="note sub">${ed.doc.bridges.length
+          ? html`${ed.doc.bridges.length} bridge${ed.doc.bridges.length > 1 ? 's' : ''} shaped by hand.
+            <button class="btn link" @click=${() => ed.resetAllBridges()}>Reset all</button>`
+          : 'Click a bridge on the canvas to shape it by hand.'}</p>
       </div>
     </section>`;
   }

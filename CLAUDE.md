@@ -22,7 +22,7 @@ npm test    # node --test "test/*.test.mjs"
 | File | Role |
 | --- | --- |
 | `src/field.js` | **Single source of truth for the shape.** `computePairs()` builds bridges; `evalField`/`evalFieldWeights` evaluate the SDF on the CPU. Also holds `DEFAULT_PARAMS`, `PARAM_RANGES`, `LIMITS` (128 blobs / 512 pairs), and no-overlap suppression. |
-| `src/renderer.js` | WebGL2 fragment shader that **mirrors `bridgeDist` + smooth-min from field.js**. Pair data goes in through an RGBA32F texture (4 texels per row). Any change to the bridge SDF or colour blending must be made in **both** places. Tile culling: `_buildTiles` gives each screen tile its own item list (RG32UI header + R16UI list textures). `skipUnchanged` (editor only) leaves the canvas alone when a frame is identical to the last. |
+| `src/renderer.js` | WebGL2 fragment shader that **mirrors `bridgeDist` + smooth-min from field.js**. Pair data goes in through an RGBA32F texture (`COLS` = 5 texels per row; texel 4 holds the bridge handles c0, c1). Any change to the bridge SDF or colour blending must be made in **both** places. Tile culling: `_buildTiles` gives each screen tile its own item list (RG32UI header + R16UI list textures). `skipUnchanged` (editor only) leaves the canvas alone when a frame is identical to the last. |
 | `src/model.js` | Document schema, `normalizeDoc` (sanitizes all loaded/URL/localStorage input), motion (`resolveBlob`: drift/orbit/swing/pulse, all periodic in `doc.loop` for seamless video), presets (Triad = reference image, Lime orbit, Chain, Cluster, Pulse ring, Blank). |
 | `src/keys.js` | Keyframes. Per blob `keys = { pos: [{t,x,y,ease}], r: [{t,v,ease}], curve }`. A track with keys overrides the static x/y or r (`baseAt`); procedural motion adds on top. Temporal easing is a cubic Hermite per segment (ease key = zero speed). The route is a centripetal Catmull–Rom spline. `normalizeKeys` sanitizes; key times sit on a 0.01 s grid in the editor. |
 | `src/scene.js` | `frameAt(doc, time)` returns `{ blobs, pairs, all }`. `blobs` is what gets drawn: size-0 blobs are left out, and blobs with keyframed size below `VANISH_R` sink via `drawnRadius`. `all` holds every blob at its true size in document order, for hit testing and the overlay. |
@@ -39,6 +39,13 @@ npm test    # node --test "test/*.test.mjs"
 - Bend and neck offset come from `hash3(idA, idB)` with pairs ordered by id: stable over time and independent of list order.
 - Colours blend over `COLOR_BAND = 0.3 × k`, and the colour along a bridge switches near the neck. This avoids muddy junctions.
 - **The user's top requirement is smoothness: no flicker, pops, or sudden breaks.** Every quantity must be a continuous function of blob positions and sizes. Tests enforce this by sampling the field (clamped to the visible ±4 band) while blobs move in 0.25–0.5 unit steps.
+
+## Hand-shaped bridges (`doc.bridges`)
+
+- Each edit is `{ a, b, c0, c1, neck, thick, flare, off }` with `a < b` blob ids. Edits at their defaults are dropped, and `normalizeDoc` flips edits given as b→a. `frameAt` passes them to `computePairs(blobs, p, edits)` as a Map keyed `"a-b"` (`bridgeEdits`, cached per array: the editor replaces the array when it adds or removes an edit). Each pair carries `a`, `b`, `c0`, `c1`.
+- The centre-line is a cubic Bézier: control points at 1/3 and 2/3 of the segment, offset sideways by (4/3·bend + c0/c1)·L. With c0 = c1 = 0 this is exactly the old parabolic bend. `bridgeDist` subtracts `handleOffset` and divides by `sqrt(1 + slope²)` so steep stretches keep their thickness. That under-estimates distance far away, so the result is clamped by the bounding-circle distance (`max(d, |p−c| − bound)`). `bound` includes the handle offsets and the slope factor. Test: "the bounding circle holds the whole curved bridge".
+- `thick` scales the neck (wMid), `flare` scales w0/w1, `neck` replaces the hashed neck position, and `off` sets sup = 1. Every handle branch is skipped when c0 = c1 = 0, and multiplying by 1 is exact, so documents without edits stay bit-identical (checked against the previous commit). The shader mirrors all of it, and a browser check compared GPU and CPU on 128k pixels of strongly edited bridges.
+- Editor: `state.bridge = {a, b}`. Hit order is bridge handles → key points → knob → blobs → bridges (and the dashed links of hidden bridges). `Delete` hides the bridge and `Esc` deselects it. Handle drags pause playback.
 
 ## Keyframes (invariants)
 

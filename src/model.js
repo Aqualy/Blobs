@@ -1,5 +1,5 @@
 // Document model: schema, validation, motion and presets.
-import { DEFAULT_PARAMS, PARAM_RANGES, LIMITS, hash3 } from './field.js';
+import { DEFAULT_PARAMS, PARAM_RANGES, LIMITS, BRIDGE_RANGES, hash3 } from './field.js';
 import { emptyKeys, normalizeKeys, baseAt, isKeyed } from './keys.js';
 
 export const PALETTE = ['#c5d92f', '#dddddd', '#111111', '#ffffff', '#8a9a1f', '#6b6b6b'];
@@ -40,7 +40,43 @@ export function emptyDoc() {
     loop: 8,
     params: { ...DEFAULT_PARAMS },
     blobs: [],
+    /** Hand-edited bridges: [{ a, b, c0, c1, neck, thick, flare, off }], a < b (blob ids). */
+    bridges: [],
   };
+}
+
+/** A bridge edit that changes nothing. */
+export const defaultBridgeEdit = (a, b) => ({ a: Math.min(a, b), b: Math.max(a, b), c0: 0, c1: 0, neck: null, thick: 1, flare: 1, off: false });
+
+/** True when an edit is back to its defaults (and can be dropped). */
+export const isDefaultEdit = (e) => !e.c0 && !e.c1 && e.neck == null && e.thick === 1 && e.flare === 1 && !e.off;
+
+function normalizeBridges(raw, ids) {
+  const out = [];
+  if (!Array.isArray(raw)) return out;
+  const seen = new Set();
+  const R = BRIDGE_RANGES;
+  for (const e of raw.slice(0, LIMITS.maxPairs * 2)) {
+    if (!e || typeof e !== 'object') continue;
+    const a = Math.round(num(e.a, 0)), b = Math.round(num(e.b, 0));
+    if (a === b || !ids.has(a) || !ids.has(b)) continue;
+    const ed = defaultBridgeEdit(a, b);
+    const key = `${ed.a}-${ed.b}`;
+    if (seen.has(key)) continue;
+    // Handles are stored for the lower-id → higher-id direction; flip if given the other way.
+    const flip = a > b ? -1 : 1;
+    const c0 = clamp(num(e.c0, 0), ...R.c) * flip, c1 = clamp(num(e.c1, 0), ...R.c) * flip;
+    ed.c0 = flip < 0 ? c1 : c0;
+    ed.c1 = flip < 0 ? c0 : c1;
+    ed.neck = e.neck == null || !Number.isFinite(e.neck) ? null : clamp(flip < 0 ? 1 - e.neck : e.neck, ...R.neck);
+    ed.thick = clamp(num(e.thick, 1), ...R.thick);
+    ed.flare = clamp(num(e.flare, 1), ...R.flare);
+    ed.off = e.off === true;
+    if (isDefaultEdit(ed)) continue;
+    seen.add(key);
+    out.push(ed);
+  }
+  return out;
 }
 
 /** Sanitize any parsed JSON into a valid document (never throws on bad fields). */
@@ -95,6 +131,7 @@ export function normalizeDoc(raw) {
   }
   for (const b of doc.blobs) if (b.id) nextId = Math.max(nextId, b.id + 1);
   for (const b of doc.blobs) if (!b.id) b.id = nextId++;
+  doc.bridges = normalizeBridges(raw.bridges, new Set(doc.blobs.map((b) => b.id)));
   return doc;
 }
 

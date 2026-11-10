@@ -1,8 +1,9 @@
 // Blobs — editor application.
-import { DEFAULT_PARAMS, LIMITS } from './field.js';
+import { DEFAULT_PARAMS, LIMITS, BRIDGE_RANGES, bridgeDist, handleOffset } from './field.js';
 import {
   PALETTE, BOARD_PRESETS, PRESETS,
   emptyDoc, normalizeDoc, makeBlob, nextBlobId, isAnimated, resolveBlob,
+  defaultBridgeEdit, isDefaultEdit,
 } from './model.js';
 import { baseAt, hasKeys, setKey, keyAt, sortTrack, TRACKS, KEY_EPS } from './keys.js';
 import { Renderer } from './renderer.js';
@@ -32,6 +33,8 @@ const state = {
   frame: { blobs: [], pairs: [], all: [] },
   /** Selected keyframes (the key objects themselves). */
   selectedKeys: new Set(),
+  /** Selected bridge { a, b } (blob ids, a < b), or null. */
+  bridge: null,
   drag: null,
   spaceDown: false,
   spaceUsed: false,
@@ -89,6 +92,7 @@ function restore(snap) {
   const ids = new Set(doc.blobs.map((b) => b.id));
   for (const id of [...state.selection]) if (!ids.has(id)) state.selection.delete(id);
   state.selectedKeys.clear();
+  if (state.bridge && !(ids.has(state.bridge.a) && ids.has(state.bridge.b))) state.bridge = null;
   state.time = state.time % doc.loop;
   notify();
   scheduleSave();
@@ -257,6 +261,167 @@ function motionPath(src) {
 }
 const hasPath = (src) => src.motion.type !== 'none' || src.keys.pos.length > 1;
 
+// ---------------------------------------------------------------- bridge handles
+const findPair = (a, b, fr = state.frame) => fr.pairs.find((q) => q.a === a && q.b === b) || null;
+const findEdit = (a, b) => doc.bridges.find((e) => e.a === a && e.b === b) || null;
+const resolvedById = (id) => state.frame.all.find((b) => b.id === id) || null;
+
+/**
+ * Board-space geometry of a bridge's handles. The centre-line is a cubic
+ * Bézier P0 → P3 with control points P1, P2 at 1/3 and 2/3 of the way,
+ * offset sideways (field.js: 4/3·bend + c0/c1). The neck anchor sits on the
+ * curve at the neck position.
+ */
+function bridgeGeom(q) {
+  const bx = q.x1 - q.x0, by = q.y1 - q.y0;
+  const L = Math.max(Math.hypot(bx, by), 1e-4);
+  const ux = bx / L, uy = by / L, nx = -uy, ny = ux;
+  const at = (tx, side) => ({ x: q.x0 + ux * tx * L + nx * side * L, y: q.y0 + uy * tx * L + ny * side * L });
+  const curve = (tx) => at(tx, q.bend * 4 * tx * (1 - tx) + handleOffset(q.c0, q.c1, tx));
+  return {
+    L, ux, uy, nx, ny, curve,
+    p0: at(0, 0), p3: at(1, 0),
+    p1: at(1 / 3, (4 / 3) * q.bend + q.c0),
+    p2: at(2 / 3, (4 / 3) * q.bend + q.c1),
+    neck: curve(q.neck),
+    /** Board point → [along, side] in units of L. */
+    local: (x, y) => {
+      const rx = x - q.x0, ry = y - q.y0;
+      return [(rx * ux + ry * uy) / L, (rx * nx + ry * ny) / L];
+    },
+  };
+}
+
+/** Hidden bridges of the selection (or the selected one), drawn as dashed links. */
+function hiddenLinks() {
+  const out = [];
+  for (const e of doc.bridges) {
+    if (!e.off) continue;
+    const sel = state.selection.has(e.a) || state.selection.has(e.b) || (state.bridge && state.bridge.a === e.a && state.bridge.b === e.b);
+    if (!sel) continue;
+    const A = resolvedById(e.a), B = resolvedById(e.b);
+    if (A && B) out.push({ e, A, B });
+  }
+  return out;
+}
+
+function hitBridgeHandle(sx, sy) {
+  if (!state.bridge) return null;
+  const q = findPair(state.bridge.a, state.bridge.b);
+  if (!q) return null;
+  const g = bridgeGeom(q);
+  const v = state.view;
+  const near = (pt, r) => Math.hypot(pt.x * v.zoom + v.x - sx, pt.y * v.zoom + v.y - sy) <= r;
+  if (near(g.p1, 8)) return { which: 'c0', q, g };
+  if (near(g.p2, 8)) return { which: 'c1', q, g };
+  if (near(g.neck, 8)) return { which: 'neck', q, g };
+  return null;
+}
+
+function hitBridge(sx, sy) {
+  const p = screenToBoard(sx, sy);
+  const tol = 4 / state.view.zoom;
+  let best = null, bestD = tol;
+  for (const q of state.frame.pairs) {
+    const d = bridgeDist(p.x, p.y, q, null);
+    if (d <= bestD) { bestD = d; best = { a: q.a, b: q.b }; }
+  }
+  if (best) return best;
+  for (const { e, A, B } of hiddenLinks()) {
+    const dx = B.x - A.x, dy = B.y - A.y;
+    const t = clamp(((p.x - A.x) * dx + (p.y - A.y) * dy) / (dx * dx + dy * dy || 1), 0, 1);
+    if (Math.hypot(p.x - A.x - dx * t, p.y - A.y - dy * t) <= 6 / state.view.zoom) return { a: e.a, b: e.b };
+  }
+  return null;
+}
+
+function drawBridgeHandles(ctx, v) {
+  const S = (pt) => [pt.x * v.zoom + v.x, pt.y * v.zoom + v.y];
+  // Hidden bridges near the selection: dashed links that can be clicked.
+  ctx.setLineDash([3, 5]);
+  for (const { e, A, B } of hiddenLinks()) {
+    const on = state.bridge && state.bridge.a === e.a && state.bridge.b === e.b;
+    ctx.strokeStyle = on ? 'rgba(197,217,47,0.9)' : 'rgba(197,217,47,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(...S(A));
+    ctx.lineTo(...S(B));
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  if (!state.bridge) return;
+  const q = findPair(state.bridge.a, state.bridge.b);
+  if (!q) return;
+  const g = bridgeGeom(q);
+  // Centre-line
+  ctx.beginPath();
+  for (let i = 0; i <= 40; i++) {
+    const [x, y] = S(g.curve(i / 40));
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.strokeStyle = '#c5d92f';
+  ctx.lineWidth = 1.25;
+  ctx.stroke();
+  // Handle arms, Bézier style
+  ctx.strokeStyle = 'rgba(197,217,47,0.7)';
+  ctx.lineWidth = 1;
+  for (const [a, b] of [[g.p0, g.p1], [g.p3, g.p2]]) {
+    ctx.beginPath();
+    ctx.moveTo(...S(a));
+    ctx.lineTo(...S(b));
+    ctx.stroke();
+  }
+  for (const pt of [g.p0, g.p3]) {
+    const [x, y] = S(pt);
+    ctx.fillStyle = '#c5d92f';
+    ctx.fillRect(Math.round(x) - 2.5, Math.round(y) - 2.5, 5, 5);
+  }
+  for (const pt of [g.p1, g.p2]) {
+    const [x, y] = S(pt);
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#121212';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#c5d92f';
+    ctx.stroke();
+  }
+  // Neck anchor: a diamond on the curve
+  const [nx, ny] = S(g.neck);
+  ctx.beginPath();
+  ctx.moveTo(nx, ny - 6); ctx.lineTo(nx + 6, ny); ctx.lineTo(nx, ny + 6); ctx.lineTo(nx - 6, ny); ctx.closePath();
+  ctx.fillStyle = '#c5d92f';
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#121212';
+  ctx.stroke();
+}
+
+/** The edit of the selected bridge, created on first use. */
+function bridgeEdit() {
+  const { a, b } = state.bridge;
+  let e = findEdit(a, b);
+  if (!e) {
+    e = defaultBridgeEdit(a, b);
+    doc.bridges = [...doc.bridges, e];
+  }
+  return e;
+}
+/** Drop edits that are back to defaults (before recording an undo step). */
+function pruneEdits() {
+  if (doc.bridges.some(isDefaultEdit)) doc.bridges = doc.bridges.filter((e) => !isDefaultEdit(e));
+}
+function selectBridge(br) {
+  state.bridge = br;
+  state.selection.clear();
+  state.selectedKeys.clear();
+  notify();
+  requestRender();
+}
+
 function drawOverlay(fr) {
   const ctx = octx;
   const v = state.view;
@@ -346,6 +511,8 @@ function drawOverlay(fr) {
     ctx.strokeStyle = '#c5d92f';
     ctx.stroke();
   }
+
+  drawBridgeHandles(ctx, v);
 
   const d = state.drag;
   if (d && d.type === 'marquee') {
@@ -447,6 +614,7 @@ function addBlobAtCenter() {
 function deleteSelection() {
   if (!state.selection.size) return;
   doc.blobs = doc.blobs.filter((b) => !state.selection.has(b.id));
+  doc.bridges = doc.bridges.filter((e) => !state.selection.has(e.a) && !state.selection.has(e.b));
   state.selection.clear();
   state.selectedKeys.clear();
   commit();
@@ -495,6 +663,7 @@ function loadDoc(d, { fit = true, record = true } = {}) {
   doc = d;
   state.selection.clear();
   state.selectedKeys.clear();
+  state.bridge = null;
   state.time = 0;
   state.lastRadius = null;
   if (record) commit();
@@ -550,6 +719,15 @@ overlay.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
   dismissHint();
 
+  const bh = hitBridgeHandle(pt.x, pt.y);
+  if (bh) {
+    // The bridge moves with its blobs; hold the frame still while shaping it.
+    if (state.playing) setPlaying(false);
+    state.drag = { type: 'bridge', which: bh.which, changed: false };
+    setCursor('grabbing');
+    return;
+  }
+
   const kp = hitKeyPoint(pt.x, pt.y);
   if (kp) {
     if (e.shiftKey) state.selectedKeys.add(kp); else state.selectedKeys = new Set([kp]);
@@ -575,6 +753,7 @@ overlay.addEventListener('pointerdown', (e) => {
   }
 
   const id = hitBlob(pt.x, pt.y);
+  if (id != null && state.bridge) { state.bridge = null; notify(); }
   if (id != null) {
     if (e.shiftKey) {
       if (state.selection.has(id)) { state.selection.delete(id); notify(); requestRender(); return; }
@@ -598,7 +777,14 @@ overlay.addEventListener('pointerdown', (e) => {
     return;
   }
 
+  const br = hitBridge(pt.x, pt.y);
+  if (br) {
+    selectBridge(br);
+    return;
+  }
+
   // Empty space: marquee selection.
+  if (state.bridge) { state.bridge = null; notify(); }
   state.drag = {
     type: 'marquee', ax: pt.x, ay: pt.y, bx: pt.x, by: pt.y,
     base: e.shiftKey ? new Set(state.selection) : new Set(),
@@ -629,11 +815,13 @@ overlay.addEventListener('pointermove', (e) => {
 
   const d = state.drag;
   if (!d) {
-    const kp = hitKeyPoint(pt.x, pt.y);
-    const knob = kp ? null : hitKnob(pt.x, pt.y);
-    const id = knob || kp ? null : hitBlob(pt.x, pt.y);
+    const bh = hitBridgeHandle(pt.x, pt.y);
+    const kp = bh ? null : hitKeyPoint(pt.x, pt.y);
+    const knob = kp || bh ? null : hitKnob(pt.x, pt.y);
+    const id = knob || kp || bh ? null : hitBlob(pt.x, pt.y);
     if (id !== state.hover) { state.hover = id; requestRender(); }
-    setCursor(state.spaceDown ? 'grab' : kp ? 'pointer' : knob ? 'nwse-resize' : id != null ? 'move' : 'default');
+    const overBridge = !bh && !kp && !knob && id == null && hitBridge(pt.x, pt.y);
+    setCursor(state.spaceDown ? 'grab' : bh || kp || overBridge ? 'pointer' : knob ? 'nwse-resize' : id != null ? 'move' : 'default');
     return;
   }
   if (d.type === 'pan') {
@@ -650,6 +838,19 @@ overlay.addEventListener('pointermove', (e) => {
       if (o) setBasePos(b, o.x + dx, o.y + dy);
     }
     d.changed = true;
+    requestRender();
+  } else if (d.type === 'bridge') {
+    const q = state.bridge && findPair(state.bridge.a, state.bridge.b);
+    if (!q) return;
+    const g = bridgeGeom(q);
+    const p = screenToBoard(pt.x, pt.y);
+    const [along, side] = g.local(p.x, p.y);
+    const ed = bridgeEdit();
+    const R = BRIDGE_RANGES;
+    if (d.which === 'neck') ed.neck = round2(clamp(along, ...R.neck) * 100) / 100;
+    else ed[d.which] = Math.round(clamp(side - (4 / 3) * q.bend, ...R.c) * 1000) / 1000;
+    d.changed = true;
+    notify();
     requestRender();
   } else if (d.type === 'keypoint') {
     const p = screenToBoard(pt.x, pt.y);
@@ -689,6 +890,11 @@ function endDrag(record = true) {
   const d = state.drag;
   state.drag = null;
   if (!d) return;
+  if (d.type === 'bridge' && d.changed) {
+    pruneEdits();
+    if (record) commit();
+    notify();
+  }
   if ((d.type === 'move' || d.type === 'resize' || d.type === 'keypoint') && d.changed) {
     for (const b of selectedBlobs()) { b.x = round2(b.x); b.y = round2(b.y); b.r = round2(b.r); roundKeys(b); }
     if (d.type === 'resize') {
@@ -769,12 +975,16 @@ window.addEventListener('keydown', (e) => {
   }
   if (k === 'Delete' || k === 'Backspace') {
     e.preventDefault();
-    if (state.selectedKeys.size) editor.deleteKeys(); else deleteSelection();
+    if (state.selectedKeys.size) editor.deleteKeys();
+    else if (state.bridge) editor.setBridgeOff(true);
+    else deleteSelection();
     return;
   }
   if (k === 'Escape') {
     if (typing) focused.blur();
-    if (state.selectedKeys.size) state.selectedKeys.clear(); else state.selection.clear();
+    if (state.selectedKeys.size) state.selectedKeys.clear();
+    else if (state.bridge) state.bridge = null;
+    else state.selection.clear();
     notify(); requestRender(); return;
   }
   if (k === 'j' || k === 'J') { editor.jumpKey(-1); return; }
@@ -883,6 +1093,7 @@ const editor = {
     notify();
   },
   selectBlob(id, additive) {
+    state.bridge = null;
     if (additive) {
       if (state.selection.has(id)) state.selection.delete(id); else state.selection.add(id);
     } else state.selection = new Set([id]);
@@ -999,6 +1210,51 @@ const editor = {
     commit(); edited();
   },
   setNoOverlap(on) { doc.params.noOverlap = !!on; commit(); edited(); },
+
+  // Bridges, edited one at a time
+  /** The selected bridge: { a, b, edit (or defaults), pair (null when not connected now) }. */
+  selectedBridge() {
+    if (!state.bridge) return null;
+    const { a, b } = state.bridge;
+    return { a, b, edit: findEdit(a, b) || defaultBridgeEdit(a, b), pair: findPair(a, b) };
+  },
+  /** Live edit of one field of the selected bridge (commit separately). */
+  setBridge(key, value) {
+    if (!state.bridge) return;
+    const ed = bridgeEdit();
+    if (key === 'neck') ed.neck = value == null ? null : clamp(value, ...BRIDGE_RANGES.neck);
+    else if (key === 'c0' || key === 'c1') ed[key] = clamp(value, ...BRIDGE_RANGES.c);
+    else ed[key] = clamp(value, ...BRIDGE_RANGES[key]);
+    edited();
+  },
+  commitBridge() { pruneEdits(); commit(); edited(); },
+  setBridgeOff(on) {
+    if (!state.bridge) return;
+    bridgeEdit().off = !!on;
+    pruneEdits(); commit(); edited();
+    if (on) toast('Bridge hidden. Select its dashed link to bring it back.');
+  },
+  /** Undo the organic bend too: the bridge runs dead straight. */
+  straightenBridge() {
+    const sb = editor.selectedBridge();
+    if (!sb?.pair) return;
+    const ed = bridgeEdit();
+    ed.c0 = ed.c1 = Math.round(-(4 / 3) * sb.pair.bend * 1000) / 1000;
+    pruneEdits(); commit(); edited();
+  },
+  resetBridge() {
+    if (!state.bridge) return;
+    const { a, b } = state.bridge;
+    doc.bridges = doc.bridges.filter((e) => !(e.a === a && e.b === b));
+    commit(); edited();
+  },
+  resetAllBridges() {
+    if (!doc.bridges.length) return;
+    doc.bridges = [];
+    commit(); edited();
+    toast('All bridge edits removed.');
+  },
+  deselectBridge() { state.bridge = null; notify(); requestRender(); },
 
   // Selection
   setRadius(v) {
@@ -1125,6 +1381,7 @@ window.blobs = {
   load: (d) => loadDoc(normalizeDoc(d)),
   setTime: (t) => { state.time = t; requestRender(); },
   play: setPlaying,
+  selectBridge: (a, b) => selectBridge({ a: Math.min(a, b), b: Math.max(a, b) }),
   /**
    * Last frame: sceneMs = bridges on the CPU, renderMs = GPU submission
    * (including tileMs, building the tile lists). drawn=false means the frame

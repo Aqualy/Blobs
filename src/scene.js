@@ -25,6 +25,23 @@ export const drawnRadius = (r) => (r >= VANISH_R ? r : r - VANISH_DEPTH * (1 - M
  *   pairs: their bridges,
  *   all:   every blob resolved at its true size, in document order (for editing).
  */
+/**
+ * doc.bridges as a Map by pair key. The map holds the edit objects
+ * themselves, so in-place edits show through; the editor replaces the array
+ * whenever an edit is added or removed.
+ */
+const editCache = new WeakMap();
+export function bridgeEdits(doc) {
+  const list = doc.bridges;
+  if (!list || !list.length) return undefined;
+  let m = editCache.get(list);
+  if (!m || m.size !== list.length) {
+    m = new Map(list.map((e) => [`${e.a}-${e.b}`, e]));
+    editCache.set(list, m);
+  }
+  return m;
+}
+
 export function frameAt(doc, time) {
   const blobs = [];
   const all = [];
@@ -40,5 +57,5 @@ export function frameAt(doc, time) {
     if (b.r <= 0) continue;
     blobs.push(!b.grow || b.r >= VANISH_R ? b : { ...b, r: drawnRadius(b.r) });
   }
-  return { blobs, pairs: computePairs(blobs, doc.params), all };
+  return { blobs, pairs: computePairs(blobs, doc.params, bridgeEdits(doc)), all };
 }
