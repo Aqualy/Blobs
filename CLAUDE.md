@@ -27,7 +27,8 @@ npm test    # node --test "test/*.test.mjs"
 | `src/keys.js` | Keyframes. Per blob `keys = { pos: [{t,x,y,ease}], r: [{t,v,ease}], curve }`. A track with keys overrides the static x/y or r (`baseAt`); procedural motion adds on top. Temporal easing is a cubic Hermite per segment (ease key = zero speed). The route is a centripetal Catmull–Rom spline. `normalizeKeys` sanitizes; key times sit on a 0.01 s grid in the editor. |
 | `src/scene.js` | `frameAt(doc, time)` returns `{ blobs, pairs, all }`. `blobs` is what gets drawn: size-0 blobs are left out, and blobs with keyframed size below `VANISH_R` sink via `drawnRadius`. `all` holds every blob at its true size in document order, for hit testing and the overlay. |
 | `src/contour.js` | Marching squares, RDP simplification, Catmull–Rom to SVG path. |
-| `src/export.js` | PNG (offscreen renderer), SVG (CPU field; multi-colour becomes crisp regions), video (MediaRecorder, one loop, real time), download helper. |
+| `src/export.js` | PNG (offscreen renderer), SVG (CPU field; multi-colour becomes crisp regions), animation (`exportAnimation`: MP4, WebM, GIF, APNG, PNG-frames ZIP; frame by frame at a chosen fps), download helper. |
+| `src/encode/` | Dependency-free encoders/muxers: `webm.js` (EBML, VP9/VP8, alpha), `mp4.js` (H.264, moov first), `gif.js` (median-cut palette, LZW), `png.js` (PNG + APNG, zlib via `CompressionStream`), `zip.js` (stored), `bytes.js` (Writer, crc32). Tested in `test/encode.test.mjs`. |
 | `src/app.js` | Editor core: pointer/touch/pinch, marquee, resize knob, keyboard, undo/redo (JSON snapshots), autosave (`localStorage` `blobs:doc:v1`), share links (`#d=` deflate-raw base64url). Exposes the `editor` API on `store.editor` and calls `notify()` after changes. `window.blobs` is a debug/automation handle; `window.blobs.stats()` gives last-frame timings. |
 | `src/ui/timeline.js` | `bl-timeline` (under the stage). It has blob rows, and selected blobs get Position and Size rows with a stopwatch, key navigator and key lanes; a ruler to scrub; an inspector for selected keys. The playhead and clock update through `subscribe('time')` by direct DOM writes, never Lit bindings (writing into a bound node breaks Lit). |
 | `src/ui/` | Lit components. `store.js` (editor handle, `notify('change'|'time')`, `StoreController`), `theme.js` (shared control styles; tokens live on `:root` in `styles.css`), `icons.js`, `controls.js` (`bl-slider`, `bl-swatches`, `bl-segmented`, `bl-switch`), `panel.js`, `topbar.js` (+ `bl-zoombar`), `dialogs.js` (`bl-export-dialog`, `bl-toasts`). Controls emit `bl-input` (live preview) and `bl-change` (record an undo step); never use native `input`, which is composed and leaks out of shadow roots. |
@@ -85,6 +86,15 @@ Intended behaviour, per the user: turning it on should remove **only bridges tha
 - `limitBridges()` runs after `suppressOverlaps`. Each blob ranks its candidates by strength −gap/reach (plus a tiny `hash3` bias that breaks exact ties). A candidate's suppression is `smoothstep(−W, W, kth − own)`, where `kth` is the cap-th strongest *other* candidate at that blob and W = 0.12. A pair takes the max over its two ends, then goes through `suppressedT` like No overlap.
 - One feedback pass lets bridges rejected elsewhere free their slot. The feedback is capped at 2·W because stronger feedback made the transition steep enough to pop (an 8-unit jump in the test).
 - Near ties, both bridges are partly suppressed. This is the price of continuity.
+
+## Animation export (invariants)
+
+- Offline, not real time: frame `i` is rendered at `t = i / fps` for `i < round(loop·fps)`, so the loop is seamless and exactly `loop` seconds long. MediaRecorder is only a fallback when WebCodecs is missing (opaque only).
+- MP4/WebM go through WebCodecs. **We do RGB→I420 ourselves** (`rgbaToI420`, limited range) and tag it: browsers' own conversion produced untagged full-range YUV, so players stretched the contrast (`#c5d92f` → `#d1f82e`). H.264 uses BT.709 (+ `colr` box). VP9 uses the BT.601 matrix (+ WebM `Colour`), because the VP9 bitstream says "unknown" and ffmpeg then assumes 601.
+- Transparent WebM: WebCodecs can't encode alpha (`alpha: 'keep'` unsupported), so a second VP9 encoder encodes the alpha as luma (I420, U/V = 128) and it goes into `BlockAdditional` (BlockAddID 1, `AlphaMode` 1). Keyframes are forced on the same frames in both streams. Fully transparent pixels get their row's nearest colour (`bleedColour`) so chroma subsampling doesn't darken soft edges.
+- GIF: max 50 fps (delays are 1/100 s; browsers slow down < 2 cs), max side 720, global palette from 16 sampled frames, no dithering (it shimmers), 1-bit alpha at 128. APNG max side 1080; MP4/WebM/PNG frames 1920. Video sides are even.
+- Verified: ffprobe frame counts/rates/durations for every format, ffmpeg libvpx decodes the WebM as RGBA, and Chromium's `<video>` plays MP4 with exact colours and WebM with alpha.
+- Dialog choices (format, fps) persist in `localStorage` `blobs:export:v1`; transparency defaults to `doc.transparent`.
 
 ## Verification workflow used
 

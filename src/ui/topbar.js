@@ -88,7 +88,7 @@ export class BlTopbar extends LitElement {
 
       <div class="group">
         <button class="btn" title="Add blob (A, or double-click the canvas)" @click=${() => ed.addBlob()}>${icon('plus', 15)}<span class="add-label">Add blob</span></button>
-        <button class="btn primary" title="Export PNG, SVG or video" @click=${() => ed.openExport()}>${icon('download', 15)}Export</button>
+        <button class="btn primary" title="Export PNG, SVG or animation" @click=${() => ed.openExport()}>${icon('download', 15)}Export</button>
       </div>
     </div>`;
   }

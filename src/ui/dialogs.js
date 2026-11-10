@@ -3,6 +3,15 @@ import { LitElement, html, css } from './lit.js';
 import { base } from './theme.js';
 import { icon } from './icons.js';
 import { store } from './store.js';
+import { ANIMATION_FORMATS, FRAME_RATES, animationSize } from '../export.js';
+
+const PREFS_KEY = 'blobs:export:v1';
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch { return {}; }
+}
+function savePrefs(p) {
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(p)); } catch { /* private mode */ }
+}
 
 export class BlExportDialog extends LitElement {
   static properties = {
@@ -10,8 +19,10 @@ export class BlExportDialog extends LitElement {
     progress: { state: true },
     status: { state: true },
     scale: { state: true },
-    video: { state: true },
-    loop: { state: true },
+    support: { state: true },
+    format: { state: true },
+    fps: { state: true },
+    transparent: { state: true },
   };
 
   static styles = [base, css`
@@ -26,7 +37,32 @@ export class BlExportDialog extends LitElement {
     .head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 0 20px; }
     h2 { margin: 0; font-size: 15px; font-weight: 650; }
     .sub { margin: 2px 0 0; font-size: 12px; color: var(--text-2); }
-    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 16px 20px 20px; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 16px 20px 20px; }
+    .anim { grid-column: 1 / -1; }
+    .anim .top { display: flex; align-items: center; gap: 10px; }
+    .anim .top p { margin-top: 2px; }
+    .form { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: 8px 12px; }
+    .form > label { font-size: 12px; color: var(--text-2); }
+    .anim .seg button { white-space: nowrap; padding: 0 8px; }
+    .seg button:disabled { opacity: .38; cursor: not-allowed; }
+    .seg button:disabled:hover { color: var(--text-2); }
+    .note { font-size: 11.5px; color: var(--text-3); }
+    .note.warn { color: var(--text-2); }
+    .meta { font-size: 11.5px; color: var(--text-2); }
+    .actions { display: flex; align-items: center; gap: 12px; }
+    .actions .meta { flex: 1; }
+    .card.anim .btn.primary { width: auto; min-width: 150px; }
+    .sw { display: inline-flex; align-items: center; gap: 10px; background: none; border: none; padding: 2px 0; color: var(--text); font-size: 12px; cursor: pointer; }
+    .sw:disabled { cursor: not-allowed; opacity: .45; }
+    .sw .track { position: relative; width: 32px; height: 18px; border-radius: 999px; background: var(--track); transition: background .15s; }
+    .sw .track::after {
+      content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+      background: var(--thumb); box-shadow: 0 1px 3px rgba(0,0,0,.4); transition: transform .15s ease;
+    }
+    .sw[aria-checked="true"] .track { background: var(--lime); }
+    .sw[aria-checked="true"] .track::after { transform: translateX(14px); background: var(--lime-ink); }
+    .sw:focus-visible { outline: none; }
+    .sw:focus-visible .track { box-shadow: 0 0 0 2px var(--surface-2), 0 0 0 4px var(--focus); }
     .card {
       display: flex; flex-direction: column; gap: 10px; padding: 14px;
       background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-m);
@@ -50,7 +86,15 @@ export class BlExportDialog extends LitElement {
     .bar { flex: 1; height: 6px; border-radius: 999px; background: var(--track); overflow: hidden; }
     .bar div { height: 100%; background: var(--lime); border-radius: inherit; transition: width .12s; }
     .status { min-width: 92px; font-size: 12px; color: var(--text-2); text-align: right; }
-    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+    @media (max-width: 700px) {
+      .grid { grid-template-columns: 1fr; }
+      .form { grid-template-columns: 1fr; gap: 4px; }
+      .form > label { margin-top: 6px; }
+      .form > .spacer { display: none; }
+      .seg { flex-wrap: wrap; }
+      .actions { flex-direction: column; align-items: stretch; }
+      .card.anim .btn.primary { width: 100%; }
+    }
   `];
 
   constructor() {
@@ -59,8 +103,11 @@ export class BlExportDialog extends LitElement {
     this.progress = 0;
     this.status = '';
     this.scale = 1;
-    this.video = '';
-    this.loop = 0;
+    this.support = null;
+    const prefs = loadPrefs();
+    this.format = ANIMATION_FORMATS[prefs.format] ? prefs.format : 'mp4';
+    this.fps = FRAME_RATES.includes(prefs.fps) ? prefs.fps : 30;
+    this.transparent = false;
     this.abort = null;
   }
 
@@ -68,15 +115,18 @@ export class BlExportDialog extends LitElement {
 
   show() {
     const ed = store.editor;
-    this.video = ed.videoSupport() || '';
-    this.loop = ed.doc.loop;
+    this.transparent = !!ed.doc.transparent;
+    this.support = null;
+    ed.animationSupport().then((sup) => {
+      this.support = sup;
+      if (!sup[this.format]?.ok) this.format = Object.keys(sup).find((k) => sup[k].ok) || this.format;
+    }).catch((err) => console.error(err));
     this.renderRoot.querySelector('dialog').showModal();
     store.modal = true;
   }
 
   render() {
     const pct = Math.round(this.progress * 100);
-    const fmt = this.video.includes('mp4') ? 'MP4' : 'WebM';
     return html`<dialog aria-labelledby="t" @close=${this.onClose}>
       <div class="head">
         <div><h2 id="t">Export</h2><p class="sub">Every export covers the full artboard.</p></div>
@@ -99,14 +149,7 @@ export class BlExportDialog extends LitElement {
           <p>Vector outline of the current frame. Where colours blend, the SVG uses crisp colour regions.</p>
           <button class="btn primary" ?disabled=${this.busy} @click=${this.svg}>Download SVG</button>
         </div>
-        <div class="card">
-          <div class="glyph">${icon('video', 18)}</div>
-          <h3>Video</h3>
-          <p>${this.video
-            ? `Records one seamless ${this.loop}s loop in real time (${fmt}).`
-            : 'Video recording is not supported in this browser.'}</p>
-          <button class="btn primary" ?disabled=${this.busy || !this.video} @click=${this.record}>Record video</button>
-        </div>
+        ${this.renderAnimation()}
       </div>
       <div class="progress" ?hidden=${!this.busy}>
         <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${pct}><div style="width:${pct}%"></div></div>
@@ -114,6 +157,66 @@ export class BlExportDialog extends LitElement {
         <button class="btn sm" @click=${() => this.abort?.abort()} ?hidden=${!this.abort}>Cancel</button>
       </div>
     </dialog>`;
+  }
+
+  renderAnimation() {
+    const doc = store.editor?.doc;
+    if (!doc) return '';
+    const sup = this.support;
+    const f = ANIMATION_FORMATS[this.format];
+    const s = sup?.[this.format];
+    const fps = Math.min(this.fps, f.maxFps);
+    const canAlpha = !!f.alpha && (!s || s.alpha);
+    const transparent = this.transparent && canAlpha;
+    const { w, h } = animationSize(doc, this.format);
+    const frames = Math.max(1, Math.round(doc.loop * fps));
+    let alphaNote = '';
+    if (!f.alpha) alphaNote = `${f.label} cannot store transparency, so the background colour is used.`;
+    else if (s && !s.alpha) alphaNote = 'This browser cannot encode transparent WebM. Use APNG or PNG frames.';
+    else if (transparent && this.format === 'gif') alphaNote = 'GIF transparency is on or off per pixel, so soft edges become hard.';
+    const realtime = s?.realtime ? ' · recorded in real time' : '';
+    return html`<div class="card anim">
+      <div class="top">
+        <div class="glyph">${icon('video', 18)}</div>
+        <div><h3>Animation</h3><p>One seamless ${doc.loop}s loop, rendered frame by frame.</p></div>
+      </div>
+      <div class="form">
+        <label id="fmt-l">Format</label>
+        <div class="seg" role="radiogroup" aria-labelledby="fmt-l">
+          ${Object.entries(ANIMATION_FORMATS).map(([k, v]) => {
+            const ok = !sup || sup[k]?.ok;
+            return html`<button type="button" role="radio" aria-checked=${this.format === k} class=${this.format === k ? 'on' : ''}
+              ?disabled=${!ok || this.busy} title=${ok ? v.note : 'Not supported in this browser'}
+              @click=${() => this.setPref({ format: k })}>${v.label}</button>`;
+          })}
+        </div>
+        <span class="spacer"></span><span class="note">${f.note}</span>
+        <label id="fps-l">Frame rate</label>
+        <div class="seg" role="radiogroup" aria-labelledby="fps-l">
+          ${FRAME_RATES.map((r) => html`<button type="button" role="radio" aria-checked=${fps === r} class=${fps === r ? 'on' : ''}
+            ?disabled=${r > f.maxFps || this.busy} title=${r > f.maxFps ? `${f.label} plays at most ${f.maxFps} fps` : `${r} frames per second`}
+            @click=${() => this.setPref({ fps: r })}>${r}</button>`)}
+        </div>
+        <label id="bg-l">Background</label>
+        <div>
+          <button type="button" class="sw" role="switch" aria-labelledby="bg-l" aria-checked=${transparent}
+            ?disabled=${!canAlpha || this.busy} @click=${() => { this.transparent = !this.transparent; }}>
+            <span class="track"></span>${transparent ? 'Transparent' : 'Solid colour'}
+          </button>
+        </div>
+        ${alphaNote ? html`<span class="spacer"></span><span class="note warn">${alphaNote}</span>` : ''}
+      </div>
+      <div class="actions">
+        <span class="meta mono">${w} × ${h} px · ${fps} fps · ${frames} frames${realtime}</span>
+        <button class="btn primary" ?disabled=${this.busy || (sup && !s?.ok)} @click=${this.animation}>Export ${f.label}</button>
+      </div>
+    </div>`;
+  }
+
+  setPref(p) {
+    if (p.format) this.format = p.format;
+    if (p.fps) this.fps = p.fps;
+    savePrefs({ format: this.format, fps: this.fps });
   }
 
   onClose() {
@@ -136,13 +239,18 @@ export class BlExportDialog extends LitElement {
 
   svg = () => this.run('', () => store.editor.exportSVG((p) => { this.progress = p; }));
 
-  record = () => {
+  animation = () => {
     const ac = new AbortController();
     this.abort = ac;
-    const loop = store.editor.doc.loop;
-    return this.run('Recording…', () => store.editor.recordVideo(ac.signal, (p) => {
+    const f = ANIMATION_FORMATS[this.format];
+    const opts = {
+      format: this.format,
+      fps: Math.min(this.fps, f.maxFps),
+      transparent: this.transparent && !!f.alpha && this.support?.[this.format]?.alpha !== false,
+    };
+    return this.run('Rendering…', () => store.editor.exportAnimation(opts, ac.signal, (p, i, n) => {
       this.progress = p;
-      this.status = `${(p * loop).toFixed(1)}s / ${loop}s`;
+      this.status = `${i} / ${n}`;
     }));
   };
 }

@@ -8,7 +8,7 @@ import {
 import { baseAt, hasKeys, setKey, keyAt, sortTrack, TRACKS, KEY_EPS } from './keys.js';
 import { Renderer } from './renderer.js';
 import { frameAt } from './scene.js';
-import { exportPNG, exportSVG, recordVideo, videoSupport, download } from './export.js';
+import { exportPNG, exportSVG, exportAnimation, animationSupport, download } from './export.js';
 import { store, notify } from './ui/store.js';
 import './ui/topbar.js';
 import './ui/panel.js';
@@ -1319,7 +1319,7 @@ const editor = {
 
   // Export
   openExport() { exportDialog.show(); },
-  videoSupport,
+  animationSupport: () => animationSupport(doc),
   async exportPNG(scale) {
     try {
       const blob = await exportPNG(doc, state.time, scale);
@@ -1340,13 +1340,14 @@ const editor = {
       toast('SVG export failed: ' + err.message, { error: true });
     }
   },
-  async recordVideo(signal, onProgress) {
+  /** @param {{ format: string, fps: number, transparent: boolean }} opts */
+  async exportAnimation(opts, signal, onProgress) {
     try {
-      const { blob, ext } = await recordVideo(doc, { signal, onProgress });
+      const { blob, ext } = await exportAnimation(doc, { ...opts, signal, onProgress });
       download(blob, `blobs-${stamp()}.${ext}`);
-      toast('Video exported.');
+      toast('Animation exported.');
     } catch (err) {
-      if (err.name !== 'AbortError') { console.error(err); toast('Recording failed: ' + (err.message || err), { error: true }); }
+      if (err.name !== 'AbortError') { console.error(err); toast('Export failed: ' + (err.message || err), { error: true }); }
     }
   },
 };
